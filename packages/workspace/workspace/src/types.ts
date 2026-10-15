@@ -60,22 +60,31 @@ export interface SessionActivity {
 }
 
 /**
- * One workspace: a stable id over an existing directory, a display title, and
- * an ordered candidate account of sessions. Membership validates header cwd
- * against the workspace path, but preserves an existing account when its
- * fully qualified cwd is missing. Consumers only see this interface; the
- * implementation stays private.
+ * One workspace: a stable id over an ordered set of member directories, a
+ * display title, and an ordered candidate account of sessions. The first
+ * member is the primary path; membership requires both an id in that account
+ * and a session header whose canonical cwd equals one of the member paths,
+ * but preserves an existing account when its fully qualified cwd is missing.
+ * Consumers only see this interface; the implementation stays private.
  */
 export interface Workspace {
   /** Stable record id (generated uuid). */
   readonly id: WorkspaceId
 
   /**
-   * Canonical directory path: the `fs.realpath` of the path given at create
-   * time (trailing slashes, `..`, and symlinks all resolved). Never rewritten
-   * afterwards, even when the directory disappears (see {@link status}).
+   * Canonical primary directory path: the `fs.realpath` of the path given at
+   * create time (trailing slashes, `..`, and symlinks all resolved). Never
+   * rewritten afterwards, even when the directory disappears (see
+   * {@link status}). Always the first element of {@link paths}.
    */
   readonly path: string
+
+  /**
+   * Every member directory, primary path first. Each member grants the same
+   * read/write standing as the primary path; a session whose canonical cwd
+   * equals any member is accounted to this workspace.
+   */
+  readonly paths: readonly string[]
 
   /** Display title. Defaults to the final path segment, or a filesystem root's own spelling; duplicates are allowed. */
   readonly title: string
@@ -107,11 +116,33 @@ export interface Workspace {
   setTitle(title: string): Promise<void>
 
   /**
+   * Add one member directory durably. The path is canonicalized through the
+   * same `fs.realpath` canon as the primary path and must name an existing
+   * directory; adding an existing member resolves without writing, aside from
+   * the durable filtered-candidate prune every accepted mutation performs.
+   * @param path - Directory to add, in a fully qualified spelling.
+   * @returns resolution after durability.
+   */
+  addPath(path: string): Promise<void>
+
+  /**
+   * Remove one member directory durably. The primary path cannot be removed —
+   * retitling membership around a new primary is a delete plus create, not a
+   * member edit. Removing a non-member resolves without writing, aside from
+   * the durable filtered-candidate prune every accepted mutation performs. A
+   * member whose directory was deleted remains removable.
+   * @param path - Member directory to remove, in a fully qualified spelling.
+   * @returns resolution after durability.
+   */
+  removePath(path: string): Promise<void>
+
+  /**
    * Prepend a session to this workspace's candidate account. An already
    * accounted id resolves without writing, aside from the durable
    * filtered-candidate prune every accepted mutation performs. A new id's
    * live or persisted
-   * header cwd must resolve to an existing directory equal to {@link path};
+   * header cwd must resolve to an existing directory equal to one of
+   * {@link paths};
    * unknown ids, missing or invalid cwd values, and mismatches reject without
    * writing.
    * @param sessionId - The session to record.

@@ -35,7 +35,12 @@ async function bench() {
   runtime.releaseWorkspaceSource()
   const directoryPicker = {}
   const { remote } = runtime
-  remote.provideNamespaces({ directoryPicker })
+  // The member-row reveal verbs read the Session Remote; this lane asserts
+  // nothing about them, so the namespace answers "unsupported".
+  remote.provideNamespaces({
+    directoryPicker,
+    session: { canOpenWorkspacePath: async () => ({ ok: true as const, value: false }) },
+  })
   const locale = new LocaleRuntime(runtime.ctx)
   runtime.ctx.provide('locale', locale)
   runtime.slots.installLocale(locale)

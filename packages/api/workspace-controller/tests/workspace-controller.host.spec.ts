@@ -116,25 +116,24 @@ async function nextFrame(
 }
 
 describe('WorkspaceController commands', () => {
-  it('serializes concurrent path adoption and preserves an existing title', async () => {
+  it('serializes concurrent path adoption into two registrations', async () => {
     const { controller, root } = await harness()
     const path = stageDir(root, 'alpha')
     const results = await Promise.all([
       controller.create({ path }),
       controller.create({ path }),
     ])
-    const created = results.find(result => result.created)
-    const resolved = results.find(result => !result.created)
-    expect(created).toMatchObject({ workspace: { path, title: 'alpha' } })
-    expect(resolved?.workspace.workspaceId).toBe(created?.workspace.workspaceId)
+    // Adding a Workspace is an explicit act: every call registers anew, even
+    // for a path another registration already heads.
+    expect(results.every(result => result.created)).toBe(true)
+    expect(results[0].workspace.workspaceId).not.toBe(results[1].workspace.workspaceId)
+    expect(results[0].workspace).toMatchObject({ path, title: 'alpha', paths: [path] })
 
-    const workspaceId = created?.workspace.workspaceId
-    if (workspaceId === undefined) throw new Error('fixture did not create a Workspace')
+    const workspaceId = results[0].workspace.workspaceId
     await controller.rename({ workspaceId, title: 'renamed' })
-    await expect(controller.create({ path })).resolves.toMatchObject({
-      created: false,
-      workspace: { workspaceId, title: 'renamed' },
-    })
+    const again = await controller.create({ path })
+    expect(again.created).toBe(true)
+    expect(again.workspace.workspaceId).not.toBe(workspaceId)
   })
 
   it('maps invalid paths, blank names, conflicts, and unknown ids to stable failures', async () => {
@@ -159,7 +158,7 @@ describe('WorkspaceController commands', () => {
   it('preserves Remote failures and propagates unexpected registry failures', async () => {
     const { controller, ctx, root } = await harness()
     const remoteFailure = new RemoteError('fixture/failure', 'already mapped', {})
-    const resolveByPath = vi.spyOn(ctx.workspaceRegistry, 'resolveByPath')
+    const create = vi.spyOn(ctx.workspaceRegistry, 'create')
       .mockRejectedValueOnce(remoteFailure)
       .mockRejectedValueOnce('plain failure')
     await expect(controller.create({ path: stageDir(root, 'remote-failure') }))
@@ -167,7 +166,7 @@ describe('WorkspaceController commands', () => {
     const plainFailure = controller.create({ path: stageDir(root, 'plain-failure') })
     await expect(plainFailure).rejects.toMatchObject({ code: 'workspace/invalid-path' })
     await expect(plainFailure).rejects.toThrow('plain failure')
-    resolveByPath.mockRestore()
+    create.mockRestore()
 
     const created = await controller.create({ path: stageDir(root, 'created') })
     const workspace = ctx.workspaceRegistry.get(created.workspace.workspaceId)
@@ -211,11 +210,11 @@ describe('WorkspaceController commands', () => {
     const target = await controller.create({ path: stageDir(root, 'target') })
     const blockerPath = stageDir(root, 'blocker')
     const gate = deferred<undefined>()
-    const originalResolveByPath = ctx.workspaceRegistry.resolveByPath.bind(ctx.workspaceRegistry)
-    const resolveByPath = vi.spyOn(ctx.workspaceRegistry, 'resolveByPath')
-    resolveByPath.mockImplementationOnce(async (path) => {
+    const originalCreate = ctx.workspaceRegistry.create.bind(ctx.workspaceRegistry)
+    const create = vi.spyOn(ctx.workspaceRegistry, 'create')
+    create.mockImplementationOnce(async (path) => {
       await gate.promise
-      return originalResolveByPath(path)
+      return originalCreate(path)
     })
 
     const blocker = controller.create({ path: blockerPath })
@@ -303,6 +302,43 @@ describe('WorkspaceController commands', () => {
       .resolves.toEqual({ archivedSessionIds: [] })
   })
 
+  it('adds and removes member directories with stable failure codes', async () => {
+    const { controller, ctx, root } = await harness()
+    const created = await controller.create({ path: stageDir(root, 'members') })
+    const workspaceId = created.workspace.workspaceId
+    const member = stageDir(root, 'member')
+
+    const added = await controller.addProject({ workspaceId, path: member })
+    expect(added.workspace.paths).toEqual([created.workspace.path, member])
+    expect(added.workspace.missingPaths).toEqual([])
+    // A repeated add is an explicit refusal the pick flow localizes, not a
+    // silent no-op.
+    await expect(controller.addProject({ workspaceId, path: member })).rejects.toMatchObject({
+      code: 'workspace/path-exists',
+      details: { workspaceId, path: member },
+    })
+    await expect(controller.addProject({ workspaceId, path: join(root, 'missing') }))
+      .rejects.toMatchObject({ code: 'workspace/path-invalid' })
+    await expect(controller.addProject({ workspaceId: 'missing' as WorkspaceId, path: member }))
+      .rejects.toMatchObject({ code: 'workspace/not-found' })
+
+    // A deleted member directory reads as missing but stays removable.
+    rmSync(member, { recursive: true })
+    const missing = await controller.rename({ workspaceId, title: 'members' })
+    expect(missing.workspace.missingPaths).toEqual([member])
+    const removed = await controller.removeProject({ workspaceId, path: member })
+    expect(removed.workspace.paths).toEqual([created.workspace.path])
+    await expect(controller.removeProject({ workspaceId, path: created.workspace.path }))
+      .rejects.toMatchObject({ code: 'workspace/path-invalid' })
+    await expect(controller.removeProject({ workspaceId: 'missing' as WorkspaceId, path: member }))
+      .rejects.toMatchObject({ code: 'workspace/path-invalid' })
+
+    // A RemoteError from below passes through unwrapped.
+    const remoteFailure = new RemoteError('fixture/failure', 'already mapped', {})
+    vi.spyOn(ctx.workspaceRegistry, 'removePath').mockRejectedValueOnce(remoteFailure)
+    await expect(controller.removeProject({ workspaceId, path: member })).rejects.toBe(remoteFailure)
+  })
+
   it('pins only known unarchived Sessions and unpins idempotently', async () => {
     const { controller, ctx, root } = await harness()
     const created = await controller.create({ path: stageDir(root, 'pins') })
@@ -332,6 +368,40 @@ describe('WorkspaceController commands', () => {
 })
 
 describe('WorkspaceController follow', () => {
+  it('projects member paths in increments, tolerating records written before the paths field', async () => {
+    const { controller, ctx, root } = await harness()
+    const abort = new AbortController()
+    const iterator = controller.follow(abort.signal)[Symbol.asyncIterator]()
+    try {
+      await nextFrame(iterator)
+      const created = await controller.create({ path: stageDir(root, 'membered') })
+      await expect(nextFrame(iterator)).resolves.toMatchObject({
+        type: 'upsert', workspace: { paths: [created.workspace.path], missingPaths: [] },
+      })
+      await nextFrame(iterator)
+      // A domain write carrying a record without the paths field (pre-multi-root media).
+      ctx.emit('domain/changed', {
+        domain: 'workspace',
+        table: 'workspaces',
+        key: String(created.workspace.workspaceId),
+        operation: 'put',
+        value: {
+          path: created.workspace.path,
+          title: 'legacy',
+          sessionIds: [],
+          createdAt: created.workspace.createdAt,
+          updatedAt: created.workspace.updatedAt,
+        },
+      })
+      await expect(nextFrame(iterator)).resolves.toMatchObject({
+        type: 'upsert', workspace: { paths: [created.workspace.path], missingPaths: [] },
+      })
+    } finally {
+      abort.abort()
+      await iterator.return?.()
+    }
+  })
+
   it('seeds a new feed from existing rows and rejects an inconsistent registry commit', async () => {
     const { ctx, root } = await harness()
     const existing = await ctx.workspaceRegistry.create(stageDir(root, 'existing'))

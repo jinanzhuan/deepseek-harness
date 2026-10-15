@@ -59,12 +59,29 @@ describe('Workspace Files Session scope lookup', () => {
       })
       if (lookup === undefined) throw new Error('workspaceFileScope lookup did not register')
 
-      await expect(lookup.resolve(liveId)).resolves.toEqual({ sessionId: liveId, workspaceRoot: liveRoot })
+      await expect(lookup.resolve(liveId)).resolves.toEqual({ sessionId: liveId, workspaceRoot: liveRoot, listRoots: [liveRoot] })
       expect(stat).not.toHaveBeenCalled()
-      await expect(lookup.resolve(coldId)).resolves.toEqual({ sessionId: coldId, workspaceRoot: coldRoot })
-      await expect(lookup.resolve(fallbackId)).resolves.toEqual({ sessionId: fallbackId, workspaceRoot: fallbackRoot })
+      await expect(lookup.resolve(coldId)).resolves.toEqual({ sessionId: coldId, workspaceRoot: coldRoot, listRoots: [coldRoot] })
+      await expect(lookup.resolve(fallbackId)).resolves.toEqual({
+        sessionId: fallbackId, workspaceRoot: fallbackRoot, listRoots: [fallbackRoot],
+      })
       await expect(lookup.resolve(missingId)).resolves.toBeUndefined()
       expect(stat.mock.calls.map(([id]) => id)).toEqual([coldId, fallbackId, missingId])
+
+      // A session accounted by a multi-root workspace lists every member root.
+      const memberRoot = resolve('member-workspace')
+      ctx.provide('workspaceRegistry', {
+        pathsForSession: (id: SessionId) => {
+          if (id === liveId) return [liveRoot, memberRoot]
+          if (id === coldId) return []
+          return undefined
+        },
+      } as never)
+      await expect(lookup.resolve(liveId)).resolves.toEqual({
+        sessionId: liveId, workspaceRoot: liveRoot, listRoots: [liveRoot, memberRoot],
+      })
+      // An empty member set falls back to the single workspace root.
+      await expect(lookup.resolve(coldId)).resolves.toEqual({ sessionId: coldId, workspaceRoot: coldRoot, listRoots: [coldRoot] })
 
       await workspaceFiles.dispose()
       expect(ctx.typert.lookups.get('workspaceFileScope')).toBeUndefined()

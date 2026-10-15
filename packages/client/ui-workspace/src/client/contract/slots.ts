@@ -272,6 +272,21 @@ export type WorkspaceBrowserInjected = {
   unarchiveSession: (sessionId: SessionId) => Promise<void>
   /** Adopt a picked host directory as a real Workspace before targeting a Session. */
   createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
+  /**
+   * Add one member directory to a Workspace (multi-root). Absent disables the
+   * add-project affordances. The rejection carries the Host failure code (e.g.
+   * `workspace/path-exists`) for localized handling.
+   */
+  addProject?: (workspaceId: WorkspaceId, path: string) => Promise<void>
+  /** Remove one member directory from a Workspace (multi-root). Absent disables member removal. */
+  removeProject?: (workspaceId: WorkspaceId, path: string) => Promise<void>
+  /**
+   * Whether the Host can open Workspace paths in the system file manager;
+   * absent disables the member row's reveal menu item.
+   */
+  canRevealWorkspacePath?: () => Promise<boolean>
+  /** Reveal one member directory in the system file manager. */
+  revealWorkspacePath?: (path: string) => Promise<boolean>
 }
 
 /** The browser's declared viewing store handle, shared with the row actions that write view state. */

@@ -12,7 +12,7 @@ import type { MenuOpenState, SessionRowOwnerProps } from '../src/client/contract
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type { RowDragProps } from '../src/client/rows/Rows.tsx'
 import {
-  ProjectRowItem, SearchResultItem, SessionNodeItem as SessionNodeItemComponent,
+  memberBaseName, ProjectRowItem, SearchResultItem, SessionNodeItem as SessionNodeItemComponent,
 } from '../src/client/rows/Rows.tsx'
 import type { GroupNode, SearchResultNode, SessionNode } from '../src/client/tree.ts'
 import { en, zh } from '../src/client/locales.ts'
@@ -478,6 +478,30 @@ describe('workspace browser rows', () => {
       currentId={undefined} onOpen={vi.fn()} onUnarchive={vi.fn()} t={t}
     />)
     expect(screen.getByRole('treeitem').querySelector('[data-state="done"]')).not.toBeNull()
+  })
+
+  it('workspace row menu offers the add-project entry only when the action exists', () => {
+    const onAddProject = vi.fn()
+    const group: GroupNode = {
+      key: 'project', workspaceId: wid('project'), cwd: '/projects/project', createdAt: 0, label: 'Project',
+      sessionCount: 0, expanded: false, containsCurrent: false, sessions: [],
+    }
+    const view = render(<ProjectRowItem
+      group={group} onToggle={vi.fn()} onCreate={vi.fn()}
+      actions={{ rename: vi.fn(), delete: vi.fn() }} t={t}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: '工作区“Project”的操作' }))
+    expect(screen.queryByRole('menuitem', { name: '添加项目目录…' })).toBeNull()
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    view.rerender(<ProjectRowItem
+      group={group} onToggle={vi.fn()} onCreate={vi.fn()}
+      actions={{ addProject: onAddProject, rename: vi.fn(), delete: vi.fn() }} t={t}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: '工作区“Project”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '添加项目目录…' }))
+    expect(onAddProject).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('menu')).toBeNull()
   })
 
   it('workspace row menu opens on the ellipsis, renames, and shows the danger delete row', () => {
@@ -1106,6 +1130,127 @@ describe('workspace browser rows', () => {
     expect(row.className).toMatch(/archived/)
     // No leading marker: the grayed row alone carries the archived look.
     expect(screen.queryByRole('img', { name: '已归档' })).toBeNull()
+  })
+})
+
+describe('workspace member rows', () => {
+  it('labels a member by its last path segment, falling back to a bare root spelling', () => {
+    expect(memberBaseName('/projects/lib')).toBe('lib')
+    expect(memberBaseName('/projects/lib/')).toBe('lib')
+    expect(memberBaseName('/')).toBe('/')
+  })
+
+  const multiRootGroup = (overrides: Partial<GroupNode> = {}): GroupNode => ({
+    key: 'project', workspaceId: wid('project'), cwd: '/projects/main', createdAt: 0, label: 'Project',
+    sessionCount: 0, expanded: true, containsCurrent: false, sessions: [],
+    paths: ['/projects/main', '/projects/lib'],
+    ...overrides,
+  })
+
+  const memberMenu = () => ({
+    showInExplorer: vi.fn(),
+    copyPath: vi.fn(),
+    reveal: vi.fn(),
+    remove: vi.fn(),
+  })
+
+  it('renders members under an expanded multi-root workspace: primary badge, no remove on the primary', () => {
+    const menu = memberMenu()
+    render(<ProjectRowItem
+      group={multiRootGroup()} onToggle={vi.fn()} onCreate={vi.fn()}
+      actions={{ rename: vi.fn(), delete: vi.fn() }} memberMenu={menu} t={t}
+    />)
+    const rows = screen.getAllByRole('treeitem')
+    expect(rows).toHaveLength(3)
+    expect(screen.getByText('main')).toBeTruthy()
+    expect(screen.getByText('lib')).toBeTruthy()
+    expect(screen.getByText('主项目')).toBeTruthy()
+    // Only the non-primary member carries the remove affordance.
+    expect(screen.getAllByRole('button', { name: '从工作区移除该目录' })).toHaveLength(1)
+  })
+
+  it('renders no member rows while folded, and none for a single-root workspace', () => {
+    const menu = memberMenu()
+    const view = render(<ProjectRowItem
+      group={multiRootGroup({ expanded: false })} onToggle={vi.fn()} onCreate={vi.fn()}
+      actions={{ rename: vi.fn(), delete: vi.fn() }} memberMenu={menu} t={t}
+    />)
+    expect(screen.getAllByRole('treeitem')).toHaveLength(1)
+    view.rerender(<ProjectRowItem
+      group={multiRootGroup({ paths: ['/projects/main'] })} onToggle={vi.fn()} onCreate={vi.fn()}
+      actions={{ rename: vi.fn(), delete: vi.fn() }} memberMenu={menu} t={t}
+    />)
+    expect(screen.getAllByRole('treeitem')).toHaveLength(1)
+  })
+
+  it('grays a missing member with its badge and keeps it removable', () => {
+    const menu = memberMenu()
+    render(<ProjectRowItem
+      group={multiRootGroup({ missingPaths: ['/projects/lib'] })}
+      onToggle={vi.fn()} onCreate={vi.fn()}
+      actions={{ rename: vi.fn(), delete: vi.fn() }} memberMenu={menu} t={t}
+    />)
+    expect(screen.getByText('路径不存在')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '从工作区移除该目录' }))
+    expect(menu.remove).toHaveBeenCalledWith('/projects/lib')
+  })
+
+  it('opens the member context menu and routes every verb with the member path', () => {
+    const menu = memberMenu()
+    const writeText = vi.fn(async () => {})
+    const restoreClipboard = installClipboard(writeText)
+    try {
+      render(<ProjectRowItem
+        group={multiRootGroup()} onToggle={vi.fn()} onCreate={vi.fn()}
+        actions={{ rename: vi.fn(), delete: vi.fn() }} memberMenu={menu} t={t}
+      />)
+      const memberRow = screen.getByText('lib').closest('[data-row-key]') as HTMLElement
+      expect(memberRow.dataset.rowKey).toBe('member:project:/projects/lib')
+      fireEvent.contextMenu(memberRow)
+      // The non-primary member menu offers all four verbs.
+      expect(screen.getByRole('menuitem', { name: '在资源管理器中显示' })).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: '复制路径' })).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: '在访达中显示' })).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: '从工作区移除该目录' }).className).toMatch(/danger/)
+      fireEvent.click(screen.getByRole('menuitem', { name: '在资源管理器中显示' }))
+      expect(menu.showInExplorer).toHaveBeenCalledWith('/projects/lib')
+      expect(screen.queryByRole('menu')).toBeNull()
+
+      fireEvent.contextMenu(memberRow)
+      fireEvent.click(screen.getByRole('menuitem', { name: '复制路径' }))
+      expect(menu.copyPath).toHaveBeenCalledWith('/projects/lib')
+
+      fireEvent.contextMenu(memberRow)
+      fireEvent.click(screen.getByRole('menuitem', { name: '在访达中显示' }))
+      expect(menu.reveal).toHaveBeenCalledWith('/projects/lib')
+
+      fireEvent.contextMenu(memberRow)
+      fireEvent.click(screen.getByRole('menuitem', { name: '从工作区移除该目录' }))
+      expect(menu.remove).toHaveBeenCalledWith('/projects/lib')
+
+      // The primary member's menu drops only the removal entry.
+      const primaryRow = screen.getByText('main').closest('[data-row-key]') as HTMLElement
+      fireEvent.contextMenu(primaryRow)
+      expect(screen.getByRole('menuitem', { name: '在资源管理器中显示' })).toBeTruthy()
+      expect(screen.queryByRole('menuitem', { name: '从工作区移除该目录' })).toBeNull()
+      // Escape closes without selecting (Menu onClose path).
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(screen.queryByRole('menu')).toBeNull()
+    } finally {
+      restoreClipboard()
+    }
+  })
+
+  it('renders plain member rows without the verb set', () => {
+    render(<ProjectRowItem
+      group={multiRootGroup()} onToggle={vi.fn()} onCreate={vi.fn()}
+      actions={{ rename: vi.fn(), delete: vi.fn() }} t={t}
+    />)
+    expect(screen.getAllByRole('treeitem')).toHaveLength(3)
+    expect(screen.queryByRole('button', { name: '从工作区移除该目录' })).toBeNull()
+    const memberRow = screen.getByText('lib').closest('[data-row-key]') as HTMLElement
+    fireEvent.contextMenu(memberRow)
+    expect(screen.queryByRole('menu')).toBeNull()
   })
 })
 

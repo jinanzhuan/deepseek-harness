@@ -27,6 +27,7 @@ import type { FsDirEntry, FsInfo, FsPathInfo, FsTarget } from '@deepseek-ai/dsh-
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-workspace'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { Remote, RemoteError, TypertRemoteService, type TypertLookup } from '@deepseek-ai/dsh-typert-protocol'
 import { WorkspaceChangeFeed } from './changes.ts'
@@ -57,6 +58,13 @@ export interface WorkspaceFileScope {
   readonly sessionId: SessionId
   /** Session workspace root, or the deployment fallback when its header has no cwd. */
   readonly workspaceRoot: string
+  /**
+   * Every member directory of the Session's workspace, primary root first,
+   * when the Session is accounted by a multi-root Workspace; directory
+   * listing is confined to ANY member root and reports paths relative to the
+   * containing member. Absent falls back to the single {@link workspaceRoot}.
+   */
+  readonly listRoots?: readonly string[]
 }
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -213,9 +221,17 @@ export class WorkspaceFiles extends TypertRemoteService {
             : undefined
           const header = live ?? stored?.header
           if (header === undefined) return undefined
+          const workspaceRoot = header.cwd ?? scope.sandboxPolicy.workspaceRoot
+          // Multi-root widening: a session accounted by a workspace may list
+          // every member directory of that workspace, not only the primary
+          // root; unaccounted sessions keep the single-root behavior. Read
+          // leniently: the registry is optional to this package and may still
+          // be loading.
+          const members = scope.get('workspaceRegistry')?.pathsForSession(sessionId)
           return {
             sessionId,
-            workspaceRoot: header.cwd ?? scope.sandboxPolicy.workspaceRoot,
+            workspaceRoot,
+            listRoots: members !== undefined && members.length > 0 ? [...members] : [workspaceRoot],
           }
         },
       })
@@ -313,7 +329,7 @@ export class WorkspaceFiles extends TypertRemoteService {
         { path, kind: entry.type },
       )
     }
-    const target = await this.confine(root, workspaceRoot, path, signal)
+    const { target, listingRoot } = await this.confine(workspaceFileScope, root, workspaceRoot, path, signal)
     if (entry.type === 'symlink') {
       const info = await this.ctx.fs.stat(target, signal)
       if (info?.type !== 'directory') {
@@ -322,7 +338,7 @@ export class WorkspaceFiles extends TypertRemoteService {
     }
     const children = await this.ctx.fs.listDir(target, signal)
     return {
-      path: workspacePathOf(this.ctx.fs.fileUrl(root), this.ctx.fs.fileUrl(target)),
+      path: workspacePathOf(this.ctx.fs.fileUrl(listingRoot), this.ctx.fs.fileUrl(target)),
       entries: children.slice(0, this.config.maxEntries).map(directoryEntry),
       truncated: children.length > this.config.maxEntries,
     }
@@ -399,13 +415,26 @@ export class WorkspaceFiles extends TypertRemoteService {
     return { root, workspaceRoot, entry }
   }
 
-  /** Resolve an inspected path and refuse it unless the workspace contains it. */
-  private async confine(root: FsTarget, workspaceRoot: string, path: string, signal: AbortSignal): Promise<FsTarget> {
+  /**
+   * Resolve an inspected path and refuse it unless some member root of the
+   * session's workspace contains it. The answer carries the containing
+   * root, so a listing under a non-primary member reports paths relative
+   * to that member, not to the primary root.
+   */
+  private async confine(
+    workspaceFileScope: WorkspaceFileScope,
+    root: FsTarget,
+    workspaceRoot: string,
+    path: string,
+    signal: AbortSignal,
+  ): Promise<{ target: FsTarget; listingRoot: FsTarget }> {
     const target = await this.ctx.fs.resolve(path, { cwd: workspaceRoot, signal })
-    if (!this.ctx.fs.contains(root, target)) {
-      throw new RemoteError('workspace-file/outside-workspace', `"${path}" is outside the workspace`, { path })
+    const listRoots = workspaceFileScope.listRoots ?? [workspaceRoot]
+    for (const memberRoot of listRoots) {
+      const memberTarget = memberRoot === workspaceRoot ? root : await this.ctx.fs.resolve(memberRoot, { signal })
+      if (this.ctx.fs.contains(memberTarget, target)) return { target, listingRoot: memberTarget }
     }
-    return target
+    throw new RemoteError('workspace-file/outside-workspace', `"${path}" is outside the workspace`, { path })
   }
 
   /**

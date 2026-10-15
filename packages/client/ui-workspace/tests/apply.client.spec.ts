@@ -43,7 +43,7 @@ const sessionState = (items: readonly SessionSummary[]): SessionListState => ({
   projectionsBySession: {},
 })
 const workspace = (id: string, sessionIds: readonly string[]): WorkspaceView => ({
-  workspaceId: id as WorkspaceId, path: `/projects/${id}`, title: id,
+  workspaceId: id as WorkspaceId, path: `/projects/${id}`, paths: [`/projects/${id}`], missingPaths: [], title: id,
   sessionIds: sessionIds.map(sid), createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 })
 const workspaceState = (
@@ -124,12 +124,16 @@ async function bench() {
   const subscribe = () => () => {}
   const workspacesSubscribe = vi.fn(subscribe)
   const initializeDefault = vi.fn(async (): Promise<WorkspaceView | undefined> => undefined)
+  const addProject = vi.fn(async () => ({}))
+  const removeProject = vi.fn(async () => ({}))
   ctx.provide('workspaces', {
     list: { getSnapshot: () => workspaceSnapshot, subscribe: workspacesSubscribe },
     create,
     initializeDefault,
     rename,
     delete: vi.fn(async () => undefined),
+    addProject,
+    removeProject,
     insertBefore: vi.fn(async () => undefined),
     archiveSession: vi.fn(async () => undefined),
     unarchiveSession: vi.fn(async () => undefined),
@@ -153,8 +157,15 @@ async function bench() {
   } as never)
   const pickDirectory = vi.fn(() => Promise.resolve({ ok: true as const, value: '/projects/picked' }))
   const directoryPicker = { pick: pickDirectory }
-  Object.assign(new TestRemote(ctx), { directoryPicker })
+  // The member-row reveal verbs read the Session Remote; this lane asserts
+  // nothing about them, so the namespace answers "unsupported".
+  const sessionRemote = {
+    canOpenWorkspacePath: vi.fn(async () => ({ ok: true as const, value: false })),
+    openWorkspacePath: vi.fn(async () => ({ ok: true as const, value: { opened: true } })),
+  }
+  Object.assign(new TestRemote(ctx), { directoryPicker, session: sessionRemote })
   ctx.provide('remote.directoryPicker', directoryPicker as never)
+  ctx.provide('remote.session', sessionRemote as never)
   const locale = new LocaleRuntime(ctx)
   // These specs assert the shipped Chinese copy. There is no jsdom `window`
   // in this lane, so browser-language detection never runs and the locale
@@ -164,6 +175,7 @@ async function bench() {
   return {
     ctx, slots: ctx.get('slots') as SlotRegistry, locale, create, rename, commands, accessSource,
     retain, using, selectPanel, search, renameSession, binding, fork, pickDirectory, pinSession, unpinSession,
+    addProject, removeProject, sessionRemote,
     workspacesSubscribe, initializeDefault, history, scope, sessionOf,
     setWorkspaces: (snapshot: WorkspaceSnapshot): void => { workspaceSnapshot = snapshot },
     setSessions: (snapshot: SessionListState): void => { sessionSnapshot = snapshot },
@@ -219,7 +231,7 @@ describe('ui-workspace apply', () => {
 
   it('declares the services it drives', () => {
     expect(inject).toEqual([
-      'slots', 'sessions', 'workspaces', 'locale', 'remote', 'remote.directoryPicker', 'layout', 'shortcuts', 'remoteAccess',
+      'slots', 'sessions', 'workspaces', 'locale', 'remote', 'remote.directoryPicker', 'remote.session', 'layout', 'shortcuts', 'remoteAccess',
     ])
   })
 
@@ -826,6 +838,16 @@ describe('ui-workspace apply', () => {
     expect(b.rename).toHaveBeenCalledWith('ws', 'renamed')
     await browser.createWorkspace({ path: '/tmp/browser-project' })
     expect(b.create).toHaveBeenCalledWith({ path: '/tmp/browser-project' })
+    // The multi-root member verbs delegate to the Workspace service, and the
+    // reveal pair reads the Session Remote.
+    await browser.addProject?.('ws' as never, '/tmp/member')
+    expect(b.addProject).toHaveBeenCalledWith('ws', '/tmp/member')
+    await browser.removeProject?.('ws' as never, '/tmp/member')
+    expect(b.removeProject).toHaveBeenCalledWith('ws', '/tmp/member')
+    await expect(browser.canRevealWorkspacePath?.()).resolves.toBe(false)
+    expect(b.sessionRemote.canOpenWorkspacePath).toHaveBeenCalledOnce()
+    await expect(browser.revealWorkspacePath?.('/tmp/member')).resolves.toBe(true)
+    expect(b.sessionRemote.openWorkspacePath).toHaveBeenCalledWith({ path: '/tmp/member', action: 'reveal' })
 
     const picker = faceOf(b.slots.entries('conversation.hero.workspace')[0]!) as WorkspacePickerInjected
     await picker.createWorkspace({ path: '/tmp/project' })

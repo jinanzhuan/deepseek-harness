@@ -96,6 +96,26 @@ describe('workspaceFiles.list — the entry cap', () => {
 })
 
 describe('workspaceFiles.list — gates', () => {
+  it('lists a second member root and reports paths relative to that member', async () => {
+    // A session accounted by a multi-root workspace lists every member
+    // directory; the scope carries the member set the registry resolved.
+    const member = join(harness.workspace, '..', 'member')
+    await mkdir(member, { recursive: true })
+    await mkdir(join(member, 'member-src'))
+    const scoped = { ...harness.scope, listRoots: [harness.workspace, member] }
+    const listing = await endpoint().list(scoped, member, signal())
+    expect(listing.path).toBe('')
+    expect(listing.entries).toEqual([{ name: 'member-src', type: 'directory' }])
+    const nested = await endpoint().list(scoped, join(member, 'member-src'), signal())
+    expect(nested.path).toBe('member-src')
+    // The primary root still lists, and an outside path is still refused.
+    await mkdir(join(workspace, 'primary-src'))
+    const primary = await endpoint().list(scoped, join(workspace, 'primary-src'), signal())
+    expect(primary.path).toBe('primary-src')
+    const failure = await failureOf(endpoint().list(scoped, outside, signal()))
+    expect(failure.code).toBe('workspace-file/outside-workspace')
+  })
+
   it('rejects an absolute directory outside the workspace', async () => {
     const failure = await failureOf(endpoint().list(harness.scope, outside, signal()))
     expect(failure.code).toBe('workspace-file/outside-workspace')

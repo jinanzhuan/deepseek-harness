@@ -114,6 +114,38 @@ export class TestWorkspaces implements IWorkspaces {
   }
 
   /**
+   * Add a member directory (recorded). The default echoes a minimal view.
+   * @param workspaceId - target workspace.
+   * @param path - member directory to add.
+   * @returns the updated view.
+   */
+  async addProject(workspaceId: WorkspaceId, path: string): Promise<WorkspaceView> {
+    this.calls.push({ method: 'addProject', args: [workspaceId, path] })
+    const stub = this.stubs.get('addProject')
+    if (stub !== undefined) return await (stub(workspaceId, path) as Promise<WorkspaceView>)
+    return {
+      workspaceId, title: '', path: '', paths: [path], missingPaths: [], sessionIds: [],
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+  }
+
+  /**
+   * Remove a member directory (recorded). The default echoes a minimal view.
+   * @param workspaceId - target workspace.
+   * @param path - member directory to remove.
+   * @returns the updated view.
+   */
+  async removeProject(workspaceId: WorkspaceId, path: string): Promise<WorkspaceView> {
+    this.calls.push({ method: 'removeProject', args: [workspaceId, path] })
+    const stub = this.stubs.get('removeProject')
+    if (stub !== undefined) return await (stub(workspaceId, path) as Promise<WorkspaceView>)
+    return {
+      workspaceId, title: '', path: '', paths: [], missingPaths: [], sessionIds: [],
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+  }
+
+  /**
    * Move a Workspace in display order (recorded; default no-op).
    * @param workspaceId - Workspace to move.
    * @param beforeWorkspaceId - Anchor; omitted appends.

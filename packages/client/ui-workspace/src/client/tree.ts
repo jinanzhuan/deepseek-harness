@@ -81,6 +81,10 @@ export interface GroupNode {
   containsCurrent: boolean
   /** Visible session rows (empty while the group is folded). */
   sessions: readonly SessionNode[]
+  /** Member directories of a multi-root Workspace, primary first; absent for the ungrouped bucket. */
+  paths?: readonly string[]
+  /** Member directories missing on disk at the last Host projection; absent for the ungrouped bucket. */
+  missingPaths?: readonly string[]
 }
 
 /** One flat search row combining list metadata with an optional content match. */
@@ -120,6 +124,8 @@ interface Group {
   createdAt: number | undefined
   label: string
   sessions: SessionSummary[]
+  paths?: readonly string[]
+  missingPaths?: readonly string[]
 }
 
 /**
@@ -304,8 +310,14 @@ function buildGroup(
   createdAt: number | undefined,
   label: string,
   members: readonly SessionSummary[],
+  paths?: readonly string[],
+  missingPaths?: readonly string[],
 ): Group {
-  return { key, workspaceId, cwd, createdAt, label, sessions: [...members] }
+  return {
+    key, workspaceId, cwd, createdAt, label, sessions: [...members],
+    ...paths === undefined ? {} : { paths },
+    ...missingPaths === undefined ? {} : { missingPaths },
+  }
 }
 
 /** Apply a stored Ungrouped order and append newly loose Sessions by recency. */
@@ -356,6 +368,7 @@ function groupByWorkspace(
     groups.push(buildGroup(
       workspace.workspaceId, workspace.workspaceId, workspace.path,
       Date.parse(workspace.createdAt), workspace.title, members,
+      workspace.paths, workspace.missingPaths,
     ))
   }
   const stray = list.ids
@@ -456,6 +469,11 @@ export function deriveGroups(
       cwd: g.cwd,
       createdAt: g.createdAt,
       label: g.label,
+      // Member fields ride along explicitly: this second derivation rebuilds
+      // the group object, so a field added to the first level is dropped here
+      // unless forwarded.
+      ...g.paths === undefined ? {} : { paths: g.paths },
+      ...g.missingPaths === undefined ? {} : { missingPaths: g.missingPaths },
       sessionCount: g.sessions.length,
       expanded,
       containsCurrent: g.key === currentGroup,

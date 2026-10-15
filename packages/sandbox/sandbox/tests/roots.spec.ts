@@ -43,4 +43,22 @@ describe('writableRoots', () => {
     // Deduplicated after canonicalization (/tmp and os.tmpdir() may coincide).
     expect(new Set(writable).size).toBe(writable.length)
   })
+
+  it('workspace-write with workspaceRoots grants every member root in place of the single root', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'dsh-ws-'))
+    const member = mkdtempSync(join(tmpdir(), 'dsh-member-'))
+    roots.push(ws, member)
+    const writable = writableRoots({
+      mode: 'workspace-write',
+      workspaceRoot: ws,
+      workspaceRoots: [ws, member],
+    })
+    expect(writable).toContain(realpathSync.native(ws))
+    expect(writable).toContain(realpathSync.native(member))
+    expect(new Set(writable).size).toBe(writable.length)
+    // An empty member list falls back to the single primary root.
+    const single = writableRoots({ mode: 'workspace-write', workspaceRoot: ws, workspaceRoots: [] })
+    expect(single).toContain(realpathSync.native(ws))
+    expect(single).toHaveLength(writableRoots({ mode: 'workspace-write', workspaceRoot: ws }).length)
+  })
 })

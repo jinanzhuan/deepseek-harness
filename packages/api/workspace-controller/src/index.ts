@@ -10,6 +10,7 @@ import { DirectoryPickerController } from './directory-picker.ts'
 import { WorkspaceFeed, workspaceView } from './feed.ts'
 import { defaultWorkspaceDirectory, validateDocumentsDirectory } from './default-directory.ts'
 import type {
+  WorkspaceAddProjectRequest,
   WorkspaceArchiveSessionRequest,
   WorkspaceArchiveValue,
   WorkspaceBaseline,
@@ -24,6 +25,7 @@ import type {
   WorkspaceOrderValue,
   WorkspacePinSessionRequest,
   WorkspacePinValue,
+  WorkspaceRemoveProjectRequest,
   WorkspaceRenameRequest,
   WorkspaceUnarchiveSessionRequest,
   WorkspaceUnpinSessionRequest,
@@ -83,7 +85,9 @@ export class WorkspaceController extends TypertRemoteService {
   }
 
   /**
-   * Create or idempotently resolve one Workspace over an existing directory.
+   * Create one Workspace over an existing directory — always a new
+   * registration, even when the directory already heads or belongs to another
+   * Workspace (directories are shareable; adding is an explicit user act).
    * @param request - directory path to register.
    * @returns the Workspace and whether this call created it.
    */
@@ -129,6 +133,26 @@ export class WorkspaceController extends TypertRemoteService {
   @Remote('delete')
   delete(request: WorkspaceDeleteRequest): Promise<WorkspaceDeleteValue> {
     return this.commands.delete(request)
+  }
+
+  /**
+   * Add one member directory to a Workspace.
+   * @param request - Workspace identity and directory path.
+   * @returns the updated Workspace projection.
+   */
+  @Remote('addProject')
+  addProject(request: WorkspaceAddProjectRequest): Promise<WorkspaceValue> {
+    return this.commands.addProject(request)
+  }
+
+  /**
+   * Remove one member directory from a Workspace.
+   * @param request - Workspace identity and member path.
+   * @returns the updated Workspace projection.
+   */
+  @Remote('removeProject')
+  removeProject(request: WorkspaceRemoveProjectRequest): Promise<WorkspaceValue> {
+    return this.commands.removeProject(request)
   }
 
   /**

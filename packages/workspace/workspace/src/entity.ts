@@ -13,7 +13,7 @@ import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type { WorkspaceRecord } from './spec.ts'
 import type { Workspace, WorkspaceId } from './types.ts'
-import { realpathNormalize } from './paths.ts'
+import { realpathNormalize, realpathNormalizeDeepest } from './paths.ts'
 
 /** An insertSessionBefore request named a session or anchor not on the account (storage failures stay plain errors). */
 export class WorkspaceMoveInvalidError extends Error {
@@ -63,6 +63,17 @@ export interface WorkspaceEntityHost {
   rememberSessionPath(id: SessionId, path: string): void
 }
 
+/** An addPath/removePath request named an unknown workspace or a member path that must not change (storage failures stay plain errors). */
+export class WorkspacePathInvalidError extends Error {
+  /**
+   * @param message - Which path failed which membership rule, and where.
+   */
+  constructor(message: string) {
+    super(message)
+    this.name = 'WorkspacePathInvalidError'
+  }
+}
+
 /** Chain-slot abort sentinel thrown by the update fn when the record needs no change; only `mutate` observes it. */
 const unchangedSentinel = new Error('workspace record unchanged (internal sentinel)')
 
@@ -87,6 +98,30 @@ export class WorkspaceEntity implements Workspace {
     return this.record.path
   }
 
+  /**
+   * Every member directory of the workspace, primary path first. Records
+   * written before the multi-root widening carry no `paths`; they read as the
+   * single primary member.
+   */
+  get paths(): readonly string[] {
+    return this.record.paths.length > 0 ? this.record.paths : [this.record.path]
+  }
+
+  /** The member set of one record snapshot, primary path included. */
+  memberPaths(record: WorkspaceRecord = this.record): Set<string> {
+    return new Set(record.paths.length > 0 ? record.paths : [record.path])
+  }
+
+  /**
+   * Raw durable candidate-account check without the live header-index filter
+   * {@link sessionIds} applies; registry-internal membership queries use it.
+   * @param sessionId - Session to look up in the durable account.
+   * @returns whether the account names the session.
+   */
+  accountsCandidate(sessionId: SessionId): boolean {
+    return this.record.sessionIds.includes(sessionId)
+  }
+
   get title(): string {
     return this.record.title
   }
@@ -100,11 +135,61 @@ export class WorkspaceEntity implements Workspace {
   }
 
   get sessionIds(): readonly SessionId[] {
-    return this.record.sessionIds.filter(id => this.host.candidateMatches(id, this.record.path))
+    const members = this.memberPaths()
+    return this.record.sessionIds.filter((id) => {
+      for (const path of members) {
+        if (this.host.candidateMatches(id, path)) return true
+      }
+      return false
+    })
   }
 
   async setTitle(title: string): Promise<void> {
     await this.mutate(record => ({ ...record, title }))
+  }
+
+  /**
+   * Add one member directory to the workspace. The path is canonicalized
+   * through the same `fs.realpath` canon as the primary path and must name an
+   * existing directory; adding an existing member is an idempotent no-op.
+   * @param path - Directory to add, in a fully qualified spelling.
+   * @returns resolution after durability.
+   */
+  async addPath(path: string): Promise<void> {
+    const canonical = await realpathNormalize(path)
+    if (!(await stat(canonical)).isDirectory()) {
+      throw new WorkspacePathInvalidError(
+        `cannot add '${canonical}' to workspace '${this.record.path}': path is not a directory`,
+      )
+    }
+    await this.mutate((record) => {
+      const paths = record.paths.length > 0 ? record.paths : [record.path]
+      if (paths.includes(canonical)) return record
+      return { ...record, paths: [...paths, canonical] }
+    })
+  }
+
+  /**
+   * Remove one member directory from the workspace. The primary path cannot
+   * be removed — retitling membership around a new primary is a delete plus
+   * create, not a member edit. Removing a non-member is an idempotent no-op.
+   * A member whose directory was deleted still resolves through the deepest
+   * existing ancestor, so the ghost member stays removable.
+   * @param path - Member directory to remove, in a fully qualified spelling.
+   * @returns resolution after durability.
+   */
+  async removePath(path: string): Promise<void> {
+    const canonical = await realpathNormalizeDeepest(path)
+    if (canonical === this.record.path) {
+      throw new WorkspacePathInvalidError(
+        `cannot remove '${canonical}' from workspace '${this.record.path}': it is the workspace's primary path`,
+      )
+    }
+    await this.mutate((record) => {
+      const paths = record.paths.length > 0 ? record.paths : [record.path]
+      if (!paths.includes(canonical)) return record
+      return { ...record, paths: paths.filter(member => member !== canonical) }
+    })
   }
 
   async attachSession(sessionId: SessionId): Promise<void> {
@@ -136,10 +221,10 @@ export class WorkspaceEntity implements Workspace {
           + `its cwd '${header.cwd}' is not a directory`,
         )
       }
-      if (cwd !== this.record.path) {
+      if (!this.memberPaths().has(cwd)) {
         throw new Error(
           `cannot attach session '${sessionId}' to workspace '${this.record.path}': `
-          + `its cwd resolves to '${cwd}'`,
+          + `its cwd resolves to '${cwd}', which is not a member of the workspace`,
         )
       }
       this.host.rememberSessionPath(sessionId, cwd)
@@ -205,9 +290,13 @@ export class WorkspaceEntity implements Workspace {
     try {
       next = await this.host.table().update(this.id, (current) => {
         const changed = fn(current)
-        const sessionIds = changed.sessionIds.filter(
-          id => this.host.candidateMatches(id, changed.path),
-        )
+        const members = new Set(changed.paths.length > 0 ? changed.paths : [changed.path])
+        const sessionIds = changed.sessionIds.filter((id) => {
+          for (const path of members) {
+            if (this.host.candidateMatches(id, path)) return true
+          }
+          return false
+        })
         if (changed === current && sessionIds.length === current.sessionIds.length) {
           throw unchangedSentinel
         }

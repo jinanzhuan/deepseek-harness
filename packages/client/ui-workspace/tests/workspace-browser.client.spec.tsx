@@ -63,9 +63,10 @@ const sessionState = (
     byId: { ...state.byId, [main]: { ...row, retainedBy: { ...row.retainedBy, mainView: 1 } } },
   }
 }
-const workspace = (id: string, sessionIds: string[], title = id): WorkspaceView => ({
-  workspaceId: wid(id), path: `/projects/${id}`, title,
+const workspace = (id: string, sessionIds: string[], title = id, overrides: Partial<WorkspaceView> = {}): WorkspaceView => ({
+  workspaceId: wid(id), path: `/projects/${id}`, paths: [`/projects/${id}`], missingPaths: [], title,
   sessionIds: sessionIds.map(sid), createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  ...overrides,
 })
 const workspaceState = (
   items: readonly WorkspaceView[],
@@ -2436,6 +2437,124 @@ describe('WorkspaceBrowser', () => {
     fireEvent.click(screen.getByRole('button', { name: '关闭' }))
     expect(deleteWorkspace).not.toHaveBeenCalled()
     expect(screen.queryByRole('dialog', { name: '删除工作区' })).toBeNull()
+  })
+
+  it('asks before removing a member directory and warns about sessions using it', async () => {
+    const removeProject = vi.fn(async () => {})
+    const b = mount({
+      useSessions: hook(sessionState([summary('busy', 1, { cwd: '/projects/lib' })])),
+      useWorkspaces: hook(workspaceState([
+        workspace('alpha', [], 'Alpha', { paths: ['/projects/alpha', '/projects/lib'] }),
+      ])),
+      removeProject,
+    })
+    b.store.actions.setGroupExpanded('alpha', true)
+    rerender(b, {})
+    // The member row renders under the expanded Workspace with the primary badge.
+    expect(screen.getByText('主项目')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '从工作区移除该目录' }))
+    const dialog = screen.getByRole('dialog', { name: '从工作区移除目录' })
+    expect(dialog.textContent).toContain('仅从工作区移除“lib”，不会删除磁盘上的文件。')
+    expect(dialog.textContent).toContain('注意：1 个会话正以该目录为工作目录。')
+    fireEvent.click(screen.getByRole('button', { name: '移除' }))
+    await waitFor(() => { expect(removeProject).toHaveBeenCalledWith(wid('alpha'), '/projects/lib') })
+    await waitFor(() => { expect(screen.queryByRole('dialog', { name: '从工作区移除目录' })).toBeNull() })
+  })
+
+  it('keeps the member removal dialog open on failure and cancels without calling again', async () => {
+    const removeProject = vi.fn(async () => { throw new Error('storage unavailable') })
+    const b = mount({
+      useWorkspaces: hook(workspaceState([
+        workspace('alpha', [], 'Alpha', { paths: ['/projects/alpha', '/projects/lib'] }),
+      ])),
+      removeProject,
+    })
+    b.store.actions.setGroupExpanded('alpha', true)
+    rerender(b, {})
+    fireEvent.click(screen.getByRole('button', { name: '从工作区移除该目录' }))
+    fireEvent.click(screen.getByRole('button', { name: '移除' }))
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('storage unavailable') })
+    expect(screen.getByRole('dialog', { name: '从工作区移除目录' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('dialog', { name: '从工作区移除目录' })).toBeNull()
+    expect(removeProject).toHaveBeenCalledOnce()
+  })
+
+  it('member rows dispatch the explorer reveal event and gate the file-manager entry on Host support', async () => {
+    const revealWorkspacePath = vi.fn(async () => true)
+    const revealed: string[] = []
+    const listener = (event: Event) => {
+      revealed.push((event as CustomEvent<{ path: string }>).detail.path)
+    }
+    window.addEventListener('dsh-explorer:reveal', listener)
+    try {
+      const b = mount({
+        useWorkspaces: hook(workspaceState([
+          workspace('alpha', [], 'Alpha', { paths: ['/projects/alpha', '/projects/lib'] }),
+        ])),
+        canRevealWorkspacePath: vi.fn(async () => true),
+        revealWorkspacePath,
+      })
+      b.store.actions.setGroupExpanded('alpha', true)
+      rerender(b, {})
+      // The reveal capability probe settles asynchronously.
+      await waitFor(() => {
+        fireEvent.contextMenu(screen.getByText('lib'))
+        expect(screen.queryByRole('menuitem', { name: '在访达中显示' })).toBeTruthy()
+      })
+      fireEvent.click(screen.getByRole('menuitem', { name: '在访达中显示' }))
+      await waitFor(() => { expect(revealWorkspacePath).toHaveBeenCalledWith('/projects/lib') })
+
+      fireEvent.contextMenu(screen.getByText('lib'))
+      fireEvent.click(screen.getByRole('menuitem', { name: '在资源管理器中显示' }))
+      expect(revealed).toEqual(['/projects/lib'])
+
+      // The primary member's menu has no removal entry.
+      fireEvent.contextMenu(screen.getByText('alpha'))
+      expect(screen.queryByRole('menuitem', { name: '从工作区移除该目录' })).toBeNull()
+      fireEvent.keyDown(document, { key: 'Escape' })
+    } finally {
+      window.removeEventListener('dsh-explorer:reveal', listener)
+    }
+  })
+
+  it('hides the file-manager entry when the Host cannot open paths', async () => {
+    const b = mount({
+      useWorkspaces: hook(workspaceState([
+        workspace('alpha', [], 'Alpha', { paths: ['/projects/alpha', '/projects/lib'] }),
+      ])),
+      canRevealWorkspacePath: vi.fn(async () => false),
+    })
+    b.store.actions.setGroupExpanded('alpha', true)
+    rerender(b, {})
+    fireEvent.contextMenu(screen.getByText('lib'))
+    expect(screen.getByRole('menuitem', { name: '在资源管理器中显示' })).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: '在访达中显示' })).toBeNull()
+  })
+
+  it('routes the workspace menu add-project entry through the shared pick flow', async () => {
+    const addProject = vi.fn(async () => {})
+    let flowOwner: DirectoryFlowOwnerProps | undefined
+    const renderSlot: WorkspaceBrowserProps['renderSlot'] = (name: string, owner: object) => {
+      if (name !== 'sidebar.workspaces.directoryFlow') return null
+      flowOwner = owner as DirectoryFlowOwnerProps
+      return (owner as DirectoryFlowOwnerProps).open ? <div data-testid="directory-flow" /> : null
+    }
+    const startSession = vi.fn()
+    mount({
+      useWorkspaces: hook(workspaceState([workspace('alpha', [], 'Alpha')])),
+      addProject,
+      startSession,
+      renderSlot,
+    })
+    fireEvent.click(screen.getByRole('button', { name: '工作区“Alpha”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '添加项目目录…' }))
+    // The shared add flow opens, targeting the Workspace.
+    expect(screen.getByTestId('directory-flow')).toBeTruthy()
+    await act(async () => { flowOwner!.onPicked('/projects/lib') })
+    await waitFor(() => { expect(addProject).toHaveBeenCalledWith(wid('alpha'), '/projects/lib') })
+    // The pick flow's adopt resolution starts a Session in the target Workspace.
+    await waitFor(() => { expect(startSession).toHaveBeenCalledWith(wid('alpha'), { clearPreviousDraft: false }) })
   })
 
   it('search hides drag affordances (rows are not draggable during search)', () => {

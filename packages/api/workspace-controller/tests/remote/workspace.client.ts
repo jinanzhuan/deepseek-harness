@@ -8,6 +8,7 @@
 import { ok, type RemoteTable, type StreamScript } from '@deepseek-ai/dsh-remote-mock'
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  WorkspaceAddProjectRequest,
   WorkspaceArchiveSessionRequest,
   WorkspaceArchiveValue,
   WorkspaceCreateRequest,
@@ -21,6 +22,7 @@ import type {
   WorkspaceOrderValue,
   WorkspacePinSessionRequest,
   WorkspacePinValue,
+  WorkspaceRemoveProjectRequest,
   WorkspaceRenameRequest,
   WorkspaceUnarchiveSessionRequest,
   WorkspaceUnpinSessionRequest,
@@ -53,6 +55,8 @@ export function workspace(id: string, overrides: Partial<WorkspaceView> = {}): W
   return {
     workspaceId: id as WorkspaceId,
     path: `/work/${id}`,
+    paths: [`/work/${id}`],
+    missingPaths: [],
     title: id,
     sessionIds: [],
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -99,6 +103,12 @@ export const workspaceWorld: RemoteTable = {
       workspace: workspace(String(request.workspaceId), { title: request.title }),
     }),
     'workspace/delete': (_request: WorkspaceDeleteRequest): RemoteResult<WorkspaceDeleteValue> => ok({ deleted: true }),
+    'workspace/addProject': (request: WorkspaceAddProjectRequest): RemoteResult<WorkspaceValue> => ok({
+      workspace: workspace(String(request.workspaceId), { paths: [`/work/${String(request.workspaceId)}`, request.path] }),
+    }),
+    'workspace/removeProject': (request: WorkspaceRemoveProjectRequest): RemoteResult<WorkspaceValue> => ok({
+      workspace: workspace(String(request.workspaceId)),
+    }),
     'workspace/insertBefore': (request: WorkspaceInsertBeforeRequest): RemoteResult<WorkspaceOrderValue> => ok({ workspaceIds: [request.workspaceId] }),
     'workspace/insertSessionBefore': (request: WorkspaceInsertSessionBeforeRequest): RemoteResult<WorkspaceValue> => ok({
       workspace: workspace(String(request.workspaceId), { sessionIds: [request.sessionId] }),

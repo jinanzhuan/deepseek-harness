@@ -16,7 +16,7 @@
 type WorkspaceId = Branded<'WorkspaceId'>
 ```
 
-`WorkspaceId` 是[品牌化 id](core.zh.md#branded-ids)。路径标识与之分离：`realpathNormalize`（`fs.realpath`；尾部斜杠、`..` 与符号链接全部解析）是唯一的一套唯一性规范——工作区路径以规范化形式存储，唯一性即规范路径的字符串相等（指向已被拥有目录的符号链接会与之冲突），attach 时的会话 cwd 检查也走同一套规范。
+`WorkspaceId` 是[品牌化 id](core.zh.md#branded-ids)。路径标识与之分离：`realpathNormalize`（`fs.realpath`；尾部斜杠、`..` 与符号链接全部解析）是唯一的一套规范——工作区路径与成员目录都以规范化形式存储，成员身份即规范路径的字符串相等（成员的符号链接写法会与之判重），attach 时的会话 cwd 检查也走同一套规范。注册本身不去重：同一目录可以是多个工作区的主目录或成员。
 
 ## 工作区实体
 
@@ -24,22 +24,31 @@ type WorkspaceId = Branded<'WorkspaceId'>
 
 ```ts type-equiv
 /**
- * One workspace: a stable id over an existing directory, a display title, and
- * an ordered candidate account of sessions. Membership validates header cwd
- * against the workspace path, but preserves an existing account when its
- * fully qualified cwd is missing. Consumers only see this interface; the
- * implementation stays private.
+ * One workspace: a stable id over an ordered set of member directories, a
+ * display title, and an ordered candidate account of sessions. The first
+ * member is the primary path; membership requires both an id in that account
+ * and a session header whose canonical cwd equals one of the member paths,
+ * but preserves an existing account when its fully qualified cwd is missing.
+ * Consumers only see this interface; the implementation stays private.
  */
 interface Workspace {
   /** Stable record id (generated uuid). */
   readonly id: WorkspaceId
 
   /**
-   * Canonical directory path: the `fs.realpath` of the path given at create
-   * time (trailing slashes, `..`, and symlinks all resolved). Never rewritten
-   * afterwards, even when the directory disappears (see {@link status}).
+   * Canonical primary directory path: the `fs.realpath` of the path given at
+   * create time (trailing slashes, `..`, and symlinks all resolved). Never
+   * rewritten afterwards, even when the directory disappears (see
+   * {@link status}). Always the first element of {@link paths}.
    */
   readonly path: string
+
+  /**
+   * Every member directory, primary path first. Each member grants the same
+   * read/write standing as the primary path; a session whose canonical cwd
+   * equals any member is accounted to this workspace.
+   */
+  readonly paths: readonly string[]
 
   /** Display title. Defaults to the final path segment, or a filesystem root's own spelling; duplicates are allowed. */
   readonly title: string
@@ -71,11 +80,33 @@ interface Workspace {
   setTitle(title: string): Promise<void>
 
   /**
+   * Add one member directory durably. The path is canonicalized through the
+   * same `fs.realpath` canon as the primary path and must name an existing
+   * directory; adding an existing member resolves without writing, aside from
+   * the durable filtered-candidate prune every accepted mutation performs.
+   * @param path - Directory to add, in a fully qualified spelling.
+   * @returns resolution after durability.
+   */
+  addPath(path: string): Promise<void>
+
+  /**
+   * Remove one member directory durably. The primary path cannot be removed —
+   * retitling membership around a new primary is a delete plus create, not a
+   * member edit. Removing a non-member resolves without writing, aside from
+   * the durable filtered-candidate prune every accepted mutation performs. A
+   * member whose directory was deleted remains removable.
+   * @param path - Member directory to remove, in a fully qualified spelling.
+   * @returns resolution after durability.
+   */
+  removePath(path: string): Promise<void>
+
+  /**
    * Prepend a session to this workspace's candidate account. An already
    * accounted id resolves without writing, aside from the durable
    * filtered-candidate prune every accepted mutation performs. A new id's
    * live or persisted
-   * header cwd must resolve to an existing directory equal to {@link path};
+   * header cwd must resolve to an existing directory equal to one of
+   * {@link paths};
    * unknown ids, missing or invalid cwd values, and mismatches reject without
    * writing.
    * @param sessionId - The session to record.
@@ -121,7 +152,7 @@ interface Workspace {
 
 ## 注册表：`ctx.workspaceRegistry`
 
-`WorkspaceRegistry`（[签名](#ctxworkspaceregistry--workspaceregistry)）拥有注册与解析。`create(path, title?)` 要求完全限定路径并将其规范化，拒绝不存在的路径（原样传出原始 `ENOENT`）或非目录；当规范路径已被拥有时原样返回既有实体；否则创建一条标题为 `title ?? defaultWorkspaceTitle(path)` 的记录并前插到持久的注册表顺序中（不同规范路径可以共享同一显示标题，没有最终路径段时使用根路径拼写）。`get(id)` 与有序的 `list()` 是同步缓存读取；`resolveByPath(path)` 应用同一套完全限定 realpath 规范但不创建。`delete(id)` 只移除注册记录、顺序条目和会话账本——目录、用户文件、实时会话和已持久化日志一概不动，因此这些会话变为 Ungrouped（[参考](../../packages/workspace/workspace/README.zh.md)）；未知 id 返回 `false`。create 与 delete 会在其两次写入（记录 + 顺序）可能分叉之前先持久写入一个待定变更标记；启动时恰好解决被标记的那次变更——通过删除被标记的表行：这会补完被中断的 delete，并回滚被中断的 create（注册可以重建，因此回滚是安全方向）——而没有标记的顺序/表不一致则作为损坏大声失败。
+`WorkspaceRegistry`（[签名](#ctxworkspaceregistry--workspaceregistry)）拥有注册与解析。`create(path, title?)` 要求完全限定路径并将其规范化，拒绝不存在的路径（原样传出原始 `ENOENT`）或非目录；并且总是创建新登记——即使该规范路径已是其他工作区的主目录或成员——记录标题为 `title ?? defaultWorkspaceTitle(path)` 并前插到持久的注册表顺序中（不同规范路径可以共享同一显示标题，没有最终路径段时使用根路径拼写）。`get(id)` 与有序的 `list()` 是同步缓存读取；`resolveByPath(path)` 应用同一套完全限定 realpath 规范但不创建，并优先回答主目录所属方而非成员共享方；`resolvePrimaryByPath(path)` 只匹配主目录。`addPath(id, path)` 与 `removePath(id, path)` 持久编辑成员集合——主目录不可移除——`pathsForSession(sessionId)` 回答记账该会话的工作区的成员集合。`delete(id)` 只移除注册记录、顺序条目和会话账本——目录、用户文件、实时会话和已持久化日志一概不动，因此这些会话变为 Ungrouped（[参考](../../packages/workspace/workspace/README.zh.md)）；未知 id 返回 `false`。create 与 delete 会在其两次写入（记录 + 顺序）可能分叉之前先持久写入一个待定变更标记；启动时恰好解决被标记的那次变更——通过删除被标记的表行：这会补完被中断的 delete，并回滚被中断的 create（注册可以重建，因此回滚是安全方向）——而没有标记的顺序/表不一致则作为损坏大声失败。
 
 会话的 cwd 在创建时由创建者赋予，而不是由本注册表赋予——API 网关从所选工作区的 `path` 解析新会话的 cwd（回退到显式或默认 cwd），先创建会话使 cwd 落入其不可变的 [`SessionHeader`](persistence.zh.md#sessionheader--metadata-beside-the-log)，再调用 `attachSession`，后者会把已存储的 header cwd 与工作区路径重新校验一遍。首次成功启动时，注册表仅凭已持久化的 header（`id`、`cwd`、`createdAt`——绝不读事件正文）引导历史：把规范 cwd 有效的会话按目录分组为工作区，最新的排在最前；「已初始化」标记最后写入，因此被中断的引导可以安全续跑。引导只发生这一次：没有 cwd 的历史遗留会话保持 Ungrouped，此后创建的会话只能通过 `attachSession` 加入工作区。
 
@@ -314,7 +345,9 @@ Host service backing the generated `ctx.remote.workspace` namespace.
 
 ```ts cordis-catalog
 /**
- * Create or idempotently resolve one Workspace over an existing directory.
+ * Create one Workspace over an existing directory — always a new
+ * registration, even when the directory already heads or belongs to another
+ * Workspace (directories are shareable; adding is an explicit user act).
  * @param request - directory path to register.
  * @returns the Workspace and whether this call created it.
  */
@@ -343,6 +376,20 @@ Host service backing the generated `ctx.remote.workspace` namespace.
  * @returns deletion confirmation.
  */
 @Remote('delete') delete(request: WorkspaceDeleteRequest): Promise<WorkspaceDeleteValue>
+
+/**
+ * Add one member directory to a Workspace.
+ * @param request - Workspace identity and directory path.
+ * @returns the updated Workspace projection.
+ */
+@Remote('addProject') addProject(request: WorkspaceAddProjectRequest): Promise<WorkspaceValue>
+
+/**
+ * Remove one member directory from a Workspace.
+ * @param request - Workspace identity and member path.
+ * @returns the updated Workspace projection.
+ */
+@Remote('removeProject') removeProject(request: WorkspaceRemoveProjectRequest): Promise<WorkspaceValue>
 
 /**
  * Move one Workspace within the registry display order.
@@ -469,15 +516,17 @@ Durable workspace registry. Startup waits for `sessionPersistence`, builds one c
 
 ```ts cordis-catalog
 /**
- * Create or reuse a workspace for an existing directory. The fully qualified
- * path is canonicalized through `fs.realpath`; a relative, nonexistent, or
- * non-directory path rejects. Repeated calls for the same canonical path
- * return the existing entity without changing its title.
+ * Create a workspace for an existing directory — always a new registration,
+ * even when the directory already heads or belongs to another workspace:
+ * adding a workspace is an explicit user act, and directories are meant to
+ * be shareable across workspaces. The fully qualified path is canonicalized
+ * through `fs.realpath`; a relative, nonexistent, or non-directory path
+ * rejects.
  * A newly created workspace is prepended to the durable registry order.
  * Different canonical paths may share a display title.
  * @param path - Existing directory to own, in a fully qualified path spelling.
  * @param title - Display title used only when a new record is created.
- * @returns the existing or newly durable workspace.
+ * @returns the newly durable workspace.
  */
 async create(path: string, title?: string): Promise<Workspace>
 
@@ -582,11 +631,56 @@ unpinSession(sessionId: SessionId): Promise<void>
 /**
  * Resolve by canonical directory path without creating or mutating a
  * workspace. A missing path rejects during `realpath`; an existing unowned
- * directory returns `undefined`.
+ * directory returns `undefined`. A path that is one workspace's primary and
+ * another's member resolves to the primary owner. When several workspaces
+ * share the same primary path (adding a workspace always creates), the
+ * first in registry order answers — path lookup is inherently ambiguous
+ * then; callers needing every owner must scan `list()` themselves.
  * @param path - Existing directory path in a fully qualified spelling.
  * @returns the workspace owning the canonical path, when one exists.
  */
 async resolveByPath(path: string): Promise<Workspace | undefined>
+
+/**
+ * Resolve by canonical path against primary ownership only. Retained for
+ * callers that distinguish owning from merely sharing a directory; with
+ * duplicate primaries the first in registry order answers.
+ * @param path - Existing directory path in a fully qualified spelling.
+ * @returns the workspace whose primary path is the canonical path, when one exists.
+ */
+async resolvePrimaryByPath(path: string): Promise<Workspace | undefined>
+
+/**
+ * Add one member directory to a workspace. The directory must exist. Member
+ * membership is freely shared: the same directory may be a member of several
+ * workspaces — or another workspace's primary path, in which case
+ * {@link resolveByPath} still prefers the primary owner. Member edits go
+ * through the operation queue like every other durable mutation.
+ * @param id - Workspace to widen.
+ * @param path - Directory to add, in a fully qualified spelling.
+ * @returns resolution after durability.
+ */
+async addPath(id: WorkspaceId, path: string): Promise<void>
+
+/**
+ * Remove one member directory from a workspace. The primary path cannot be
+ * removed; removing a non-member is an idempotent no-op. A member whose
+ * directory was deleted remains removable through deepest-ancestor
+ * canonicalization.
+ * @param id - Workspace to narrow.
+ * @param path - Member directory to remove, in a fully qualified spelling.
+ * @returns resolution after durability.
+ */
+async removePath(id: WorkspaceId, path: string): Promise<void>
+
+/**
+ * Every member directory of the workspace accounting one session, primary
+ * path first, for multi-root file surfaces. Sessions no workspace accounts
+ * — or an unstarted registry — answer `undefined`.
+ * @param sessionId - Session whose owning workspace is asked.
+ * @returns the member paths, or `undefined` when unaccounted.
+ */
+pathsForSession(sessionId: SessionId): readonly string[] | undefined
 ```
 
 Types: [SessionId](core.zh.md)

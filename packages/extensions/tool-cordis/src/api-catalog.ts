@@ -3803,7 +3803,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: '@Remote(\'create\') create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateValue>',
-        description: 'Create or idempotently resolve one Workspace over an existing directory.',
+        description: 'Create one Workspace over an existing directory — always a new registration, even when the directory already heads or belongs to another Workspace (directories are shareable; adding is an explicit user act).',
         parameters: [{ name: 'request', description: 'directory path to register.' }],
         returns: 'the Workspace and whether this call created it.',
       },
@@ -3824,6 +3824,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Remove one Workspace registration while retaining files and Sessions.',
         parameters: [{ name: 'request', description: 'Workspace identity to remove.' }],
         returns: 'deletion confirmation.',
+      },
+      {
+        signature: '@Remote(\'addProject\') addProject(request: WorkspaceAddProjectRequest): Promise<WorkspaceValue>',
+        description: 'Add one member directory to a Workspace.',
+        parameters: [{ name: 'request', description: 'Workspace identity and directory path.' }],
+        returns: 'the updated Workspace projection.',
+      },
+      {
+        signature: '@Remote(\'removeProject\') removeProject(request: WorkspaceRemoveProjectRequest): Promise<WorkspaceValue>',
+        description: 'Remove one member directory from a Workspace.',
+        parameters: [{ name: 'request', description: 'Workspace identity and member path.' }],
+        returns: 'the updated Workspace projection.',
       },
       {
         signature: '@Remote(\'insertBefore\') insertBefore(request: WorkspaceInsertBeforeRequest): Promise<WorkspaceOrderValue>',
@@ -3914,9 +3926,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: 'async create(path: string, title?: string): Promise<Workspace>',
-        description: 'Create or reuse a workspace for an existing directory. The fully qualified path is canonicalized through `fs.realpath`; a relative, nonexistent, or non-directory path rejects. Repeated calls for the same canonical path return the existing entity without changing its title. A newly created workspace is prepended to the durable registry order. Different canonical paths may share a display title.',
+        description: 'Create a workspace for an existing directory — always a new registration, even when the directory already heads or belongs to another workspace: adding a workspace is an explicit user act, and directories are meant to be shareable across workspaces. The fully qualified path is canonicalized through `fs.realpath`; a relative, nonexistent, or non-directory path rejects. A newly created workspace is prepended to the durable registry order. Different canonical paths may share a display title.',
         parameters: [{ name: 'path', description: 'Existing directory to own, in a fully qualified path spelling.' }, { name: 'title', description: 'Display title used only when a new record is created.' }],
-        returns: 'the existing or newly durable workspace.',
+        returns: 'the newly durable workspace.',
       },
       {
         signature: 'initializeDefault(resolveDirectory: () => Promise<string>): Promise<Workspace | undefined>',
@@ -3974,9 +3986,33 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async resolveByPath(path: string): Promise<Workspace | undefined>',
-        description: 'Resolve by canonical directory path without creating or mutating a workspace. A missing path rejects during `realpath`; an existing unowned directory returns `undefined`.',
+        description: 'Resolve by canonical directory path without creating or mutating a workspace. A missing path rejects during `realpath`; an existing unowned directory returns `undefined`. A path that is one workspace\'s primary and another\'s member resolves to the primary owner. When several workspaces share the same primary path (adding a workspace always creates), the first in registry order answers — path lookup is inherently ambiguous then; callers needing every owner must scan `list()` themselves.',
         parameters: [{ name: 'path', description: 'Existing directory path in a fully qualified spelling.' }],
         returns: 'the workspace owning the canonical path, when one exists.',
+      },
+      {
+        signature: 'async resolvePrimaryByPath(path: string): Promise<Workspace | undefined>',
+        description: 'Resolve by canonical path against primary ownership only. Retained for callers that distinguish owning from merely sharing a directory; with duplicate primaries the first in registry order answers.',
+        parameters: [{ name: 'path', description: 'Existing directory path in a fully qualified spelling.' }],
+        returns: 'the workspace whose primary path is the canonical path, when one exists.',
+      },
+      {
+        signature: 'async addPath(id: WorkspaceId, path: string): Promise<void>',
+        description: 'Add one member directory to a workspace. The directory must exist. Member membership is freely shared: the same directory may be a member of several workspaces — or another workspace\'s primary path, in which case resolveByPath still prefers the primary owner. Member edits go through the operation queue like every other durable mutation.',
+        parameters: [{ name: 'id', description: 'Workspace to widen.' }, { name: 'path', description: 'Directory to add, in a fully qualified spelling.' }],
+        returns: 'resolution after durability.',
+      },
+      {
+        signature: 'async removePath(id: WorkspaceId, path: string): Promise<void>',
+        description: 'Remove one member directory from a workspace. The primary path cannot be removed; removing a non-member is an idempotent no-op. A member whose directory was deleted remains removable through deepest-ancestor canonicalization.',
+        parameters: [{ name: 'id', description: 'Workspace to narrow.' }, { name: 'path', description: 'Member directory to remove, in a fully qualified spelling.' }],
+        returns: 'resolution after durability.',
+      },
+      {
+        signature: 'pathsForSession(sessionId: SessionId): readonly string[] | undefined',
+        description: 'Every member directory of the workspace accounting one session, primary path first, for multi-root file surfaces. Sessions no workspace accounts — or an unstarted registry — answer `undefined`.',
+        parameters: [{ name: 'sessionId', description: 'Session whose owning workspace is asked.' }],
+        returns: 'the member paths, or `undefined` when unaccounted.',
       },
     ],
   },
@@ -6839,7 +6875,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SandboxExecutionPolicy',
-    declaration: 'export interface SandboxExecutionPolicy {\n    mode: SandboxMode;\n    workspaceRoot: string;\n    sessionId?: SessionId;\n}',
+    declaration: 'export interface SandboxExecutionPolicy {\n    mode: SandboxMode;\n    workspaceRoot: string;\n    workspaceRoots?: readonly string[];\n    sessionId?: SessionId;\n}',
   },
   {
     name: 'SandboxMode',
@@ -8731,7 +8767,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Workspace',
-    declaration: 'export interface Workspace {\n    readonly id: WorkspaceId;\n    readonly path: string;\n    readonly title: string;\n    readonly createdAt: string;\n    readonly updatedAt: string;\n    readonly sessionIds: readonly SessionId[];\n    setTitle(title: string): Promise<void>;\n    attachSession(sessionId: SessionId): Promise<void>;\n    insertSessionBefore(sessionId: SessionId, beforeSessionId?: SessionId): Promise<void>;\n    detachSession(sessionId: SessionId): Promise<void>;\n    status(): Promise<\'ok\' | \'missing-dir\'>;\n}',
+    declaration: 'export interface Workspace {\n    readonly id: WorkspaceId;\n    readonly path: string;\n    readonly paths: readonly string[];\n    readonly title: string;\n    readonly createdAt: string;\n    readonly updatedAt: string;\n    readonly sessionIds: readonly SessionId[];\n    setTitle(title: string): Promise<void>;\n    addPath(path: string): Promise<void>;\n    removePath(path: string): Promise<void>;\n    attachSession(sessionId: SessionId): Promise<void>;\n    insertSessionBefore(sessionId: SessionId, beforeSessionId?: SessionId): Promise<void>;\n    detachSession(sessionId: SessionId): Promise<void>;\n    status(): Promise<\'ok\' | \'missing-dir\'>;\n}',
+  },
+  {
+    name: 'WorkspaceAddProjectRequest',
+    declaration: 'export interface WorkspaceAddProjectRequest {\n    readonly workspaceId: WorkspaceId;\n    readonly path: string;\n}',
   },
   {
     name: 'WorkspaceArchiveSessionRequest',
@@ -8807,7 +8847,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkspaceFileScope',
-    declaration: 'export interface WorkspaceFileScope {\n    readonly sessionId: SessionId;\n    readonly workspaceRoot: string;\n}',
+    declaration: 'export interface WorkspaceFileScope {\n    readonly sessionId: SessionId;\n    readonly workspaceRoot: string;\n    readonly listRoots?: readonly string[];\n}',
   },
   {
     name: 'WorkspaceFileStat',
@@ -8850,6 +8890,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface WorkspacePinValue {\n    readonly pinnedSessionIds: readonly SessionId[];\n}',
   },
   {
+    name: 'WorkspaceRemoveProjectRequest',
+    declaration: 'export interface WorkspaceRemoveProjectRequest {\n    readonly workspaceId: WorkspaceId;\n    readonly path: string;\n}',
+  },
+  {
     name: 'WorkspaceRenameRequest',
     declaration: 'export interface WorkspaceRenameRequest {\n    readonly workspaceId: WorkspaceId;\n    readonly title: string;\n}',
   },
@@ -8867,7 +8911,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkspaceView',
-    declaration: 'export interface WorkspaceView {\n    readonly workspaceId: WorkspaceId;\n    readonly path: string;\n    readonly title: string;\n    readonly sessionIds: readonly SessionId[];\n    readonly createdAt: string;\n    readonly updatedAt: string;\n}',
+    declaration: 'export interface WorkspaceView {\n    readonly workspaceId: WorkspaceId;\n    readonly path: string;\n    readonly paths: readonly string[];\n    readonly missingPaths: readonly string[];\n    readonly title: string;\n    readonly sessionIds: readonly SessionId[];\n    readonly createdAt: string;\n    readonly updatedAt: string;\n}',
   },
 ]
 

@@ -56,6 +56,8 @@ function workspace(
   return {
     workspaceId: wid(id),
     path: `/w/${id}`,
+    paths: [`/w/${id}`],
+    missingPaths: [],
     title: id,
     sessionIds,
     createdAt,
@@ -197,6 +199,8 @@ class FakeWorkspaces implements IWorkspaces {
   declare readonly create: IWorkspaces['create']
   declare readonly rename: IWorkspaces['rename']
   declare readonly delete: IWorkspaces['delete']
+  declare readonly addProject: IWorkspaces['addProject']
+  declare readonly removeProject: IWorkspaces['removeProject']
   declare readonly insertBefore: IWorkspaces['insertBefore']
   declare readonly insertSessionBefore: IWorkspaces['insertSessionBefore']
   readonly pinCalls: SessionId[] = []

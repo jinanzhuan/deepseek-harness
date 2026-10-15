@@ -116,6 +116,50 @@
   margin: 0 6px 0 4px;
 }
 
+/* Member directory row of a multi-root Workspace: one indentation deeper
+   than the workspace row, inert by itself (no open action of its own). */
+.memberRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  border-radius: var(--dsw-radius-md);
+  padding: 0 8px;
+  padding-inline-start: calc(24px + var(--dsh-workspace-indent, 0px));
+  cursor: default;
+  user-select: none;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.memberRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.memberRow .rowActions {
+  height: 20px;
+}
+
+.memberRow:hover .rowActions {
+  display: inline-flex;
+}
+
+/* Compact "primary"/"missing" marker on a member row. */
+.memberBadge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: var(--dsw-radius-md);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* A member whose directory no longer exists grays out but stays removable. */
+.memberMissing .title,
+.memberMissing .folder {
+  opacity: 0.5;
+}
+
 .slot {
   flex: none;
   width: 16px;

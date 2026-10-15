@@ -128,7 +128,11 @@ export async function createWebhookSession(
   void presetScope
   signal.throwIfAborted()
 
-  const workspace = await ctx.workspaceRegistry.create(resolved.workspacePath)
+  // Workspace creation always registers anew, so reuse the primary owner
+  // explicitly: one webhook rule must not pile up duplicate registrations for
+  // the same directory.
+  const workspace = await ctx.workspaceRegistry.resolvePrimaryByPath(resolved.workspacePath)
+    ?? await ctx.workspaceRegistry.create(resolved.workspacePath)
   signal.throwIfAborted()
   const sessionId = brandString<SessionId>(`webhook-${randomUUID()}`)
   const handle = await ctx.agents.create({

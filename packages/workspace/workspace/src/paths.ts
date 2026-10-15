@@ -55,3 +55,43 @@ export async function realpathNormalize(path: string): Promise<string> {
   }
   return await realpath(path)
 }
+
+/**
+ * Canonicalize like {@link realpathNormalize}, tolerating a missing tail: the
+ * deepest existing ancestor is realpath'd and the missing remainder re-appended
+ * lexically. `removePath` needs this so a member whose directory was deleted
+ * underneath the Workspace can still match its stored canonical spelling and be
+ * cleaned up — with strict realpath the removal itself dies with ENOENT and the
+ * ghost member becomes unremovable.
+ * @param path - The path to canonicalize.
+ * @param platform - Host platform for the path grammar; injectable for deterministic path tests.
+ * @returns the canonical absolute path, or the raw spelling when no ancestor exists.
+ */
+export async function realpathNormalizeDeepest(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<string> {
+  if (!fullyQualifiedWorkspacePath(path, platform)) {
+    throw new TypeError(`Workspace path is not fully qualified: '${path}'`)
+  }
+  try {
+    return await realpath(path)
+  } catch {
+    // fall through: walk up to the deepest existing ancestor
+  }
+  const pathApi = platform === 'win32' ? win32 : posix
+  let ancestor = path
+  const tail: string[] = []
+  for (;;) {
+    const parent = pathApi.dirname(ancestor)
+    if (parent === ancestor) return path
+    tail.unshift(pathApi.basename(ancestor))
+    ancestor = parent
+    try {
+      const canonicalAncestor = await realpath(ancestor)
+      return pathApi.join(canonicalAncestor, ...tail)
+    } catch {
+      // keep walking up
+    }
+  }
+}

@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import {
+  realpathNormalize,
   WorkspaceActiveSessionError,
   WorkspaceArchivedSessionPinError,
   WorkspaceId,
@@ -13,6 +14,7 @@ import {
 import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { workspaceView } from './feed.ts'
 import type {
+  WorkspaceAddProjectRequest,
   WorkspaceArchiveSessionRequest,
   WorkspaceArchiveValue,
   WorkspaceCreateRequest,
@@ -24,6 +26,7 @@ import type {
   WorkspaceOrderValue,
   WorkspacePinSessionRequest,
   WorkspacePinValue,
+  WorkspaceRemoveProjectRequest,
   WorkspaceRenameRequest,
   WorkspaceUnarchiveSessionRequest,
   WorkspaceUnpinSessionRequest,
@@ -38,17 +41,15 @@ export class WorkspaceCommands {
   constructor(private readonly ctx: Context) {}
 
   /**
-   * Create or resolve one Workspace over an existing directory.
+   * Create one Workspace over an existing directory — always a new
+   * registration, even when the directory already heads or belongs to another
+   * Workspace (directories are shareable; adding is an explicit user act).
    * @param request - directory path to register.
    * @returns the Workspace and whether this call created it.
    */
   create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateValue> {
     return this.enqueue(async () => {
       try {
-        const existing = await this.ctx.workspaceRegistry.resolveByPath(request.path)
-        if (existing !== undefined) {
-          return { workspace: workspaceView(existing), created: false }
-        }
         const workspace = await this.ctx.workspaceRegistry.create(request.path)
         return { workspace: workspaceView(workspace), created: true }
       } catch (error) {
@@ -224,6 +225,69 @@ export class WorkspaceCommands {
   async unpinSession(request: WorkspaceUnpinSessionRequest): Promise<WorkspacePinValue> {
     await this.ctx.workspaceRegistry.unpinSession(request.sessionId)
     return { pinnedSessionIds: [...this.ctx.workspaceRegistry.pinnedSessionIds] }
+  }
+
+  /**
+   * Add one member directory to a Workspace (multi-root widening).
+   * @param request - Workspace identity and directory path.
+   * @returns the updated Workspace projection.
+   */
+  addProject(request: WorkspaceAddProjectRequest): Promise<WorkspaceValue> {
+    return this.enqueue(async () => {
+      try {
+        // Duplicate adds reach the UI as an explicit refusal, not a silent
+        // no-op: the pick flow can then say "already in the workspace"
+        // instead of pretending the folder was adopted. The registry's own
+        // addPath stays an idempotent no-op for its non-UI callers.
+        const workspace = this.requireWorkspace(request.workspaceId)
+        let canonical: string | undefined
+        try {
+          canonical = await realpathNormalize(request.path)
+        } catch {
+          canonical = undefined
+        }
+        if (canonical !== undefined && workspace.paths.includes(canonical)) {
+          throw new RemoteError(
+            'workspace/path-exists',
+            `project path "${canonical}" is already a member of Workspace "${request.workspaceId}"`,
+            { workspaceId: request.workspaceId, path: canonical },
+          )
+        }
+        await this.ctx.workspaceRegistry.addPath(WorkspaceId(request.workspaceId), request.path)
+      } catch (error) {
+        if (remoteErrorOf(error) !== undefined) throw error
+        throw new RemoteError(
+          'workspace/path-invalid',
+          `cannot add project path "${request.path}" to Workspace "${request.workspaceId}": ${errorMessage(error)}`,
+          { workspaceId: request.workspaceId, path: request.path },
+          { cause: error },
+        )
+      }
+      return { workspace: workspaceView(this.requireWorkspace(request.workspaceId)) }
+    })
+  }
+
+  /**
+   * Remove one member directory from a Workspace. The primary path cannot be
+   * removed; removing a non-member is an idempotent no-op.
+   * @param request - Workspace identity and member path.
+   * @returns the updated Workspace projection.
+   */
+  removeProject(request: WorkspaceRemoveProjectRequest): Promise<WorkspaceValue> {
+    return this.enqueue(async () => {
+      try {
+        await this.ctx.workspaceRegistry.removePath(WorkspaceId(request.workspaceId), request.path)
+      } catch (error) {
+        if (remoteErrorOf(error) !== undefined) throw error
+        throw new RemoteError(
+          'workspace/path-invalid',
+          `cannot remove project path "${request.path}" from Workspace "${request.workspaceId}": ${errorMessage(error)}`,
+          { workspaceId: request.workspaceId, path: request.path },
+          { cause: error },
+        )
+      }
+      return { workspace: workspaceView(this.requireWorkspace(request.workspaceId)) }
+    })
   }
 
   private requireWorkspace(workspaceId: WorkspaceId): Workspace {

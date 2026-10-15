@@ -1,5 +1,6 @@
 /** Reconnect-safe Workspace baseline and increment producer. */
 
+import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { Deque } from '@deepseek-ai/dsh-deque'
 import type { DomainChanged } from '@deepseek-ai/dsh-storage-domain'
@@ -20,13 +21,19 @@ type WorkspaceFeedFrame = Exclude<WorkspaceFollowFrame, { readonly type: 'replac
 
 /**
  * Project one authoritative Workspace entity into its Remote value.
+ * `missingPaths` is computed at projection time, so the client refreshes it
+ * on the next Workspace view update (a mutation event or a page reload) —
+ * it is not live monitoring.
  * @param workspace - authoritative registry entity.
  * @returns detached Workspace projection for Remote consumers.
  */
 export function workspaceView(workspace: Workspace): WorkspaceView {
+  const paths = [...workspace.paths]
   return {
     workspaceId: workspace.id,
     path: workspace.path,
+    paths,
+    missingPaths: paths.filter(path => !existsSync(path)),
     title: workspace.title,
     sessionIds: [...workspace.sessionIds],
     createdAt: workspace.createdAt,
@@ -36,9 +43,12 @@ export function workspaceView(workspace: Workspace): WorkspaceView {
 
 function changedWorkspaceView(workspaceId: string, value: unknown): WorkspaceView {
   const record: WorkspaceRecord = workspaceRecord.parse(value)
+  const paths = record.paths.length > 0 ? [...record.paths] : [record.path]
   return {
     workspaceId: WorkspaceId(workspaceId),
     path: record.path,
+    paths,
+    missingPaths: paths.filter(path => !existsSync(path)),
     title: record.title,
     sessionIds: [...record.sessionIds],
     createdAt: record.createdAt,

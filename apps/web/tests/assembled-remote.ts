@@ -29,6 +29,8 @@ interface SessionSummary {
 interface WorkspaceView {
   readonly workspaceId: string
   readonly path: string
+  readonly paths: readonly string[]
+  readonly missingPaths: readonly string[]
   readonly title: string
   sessionIds: string[]
   readonly createdAt: string
@@ -234,12 +236,13 @@ export function createAssembledRemote(options: AssembledRemoteOptions = {}): Ass
   })
   mock.unary('workspace/create', (request: unknown) => {
     const path = recordString(recordValue(request, 'request'), 'path')
-    const existing = workspaces.find(workspace => workspace.path === path)
-    if (existing !== undefined) return ok({ workspace: structuredClone(existing), created: false })
+    // Workspace creation always registers anew: directories are shareable.
     const now = new Date().toISOString()
     const workspace = {
       workspaceId: `fx-ws-${String(workspaces.length + 1)}`,
       path,
+      paths: [path],
+      missingPaths: [],
       title: path.split('/').filter(Boolean).at(-1) ?? path,
       sessionIds: [],
       createdAt: now,

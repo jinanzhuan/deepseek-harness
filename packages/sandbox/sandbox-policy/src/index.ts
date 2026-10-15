@@ -29,6 +29,7 @@ import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandb
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@deepseek-ai/dsh-workspace'
 
 export { SANDBOX_MODES, setSandboxMode } from './session-mode.ts'
 
@@ -44,7 +45,7 @@ function renderPolicyContext(policy: SandboxExecutionPolicy): string {
     case 'read-only':
       return 'Current DSH file policy: read-only. Any available operation enforced by the DSH file sandbox cannot modify files in the standing mode. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.'
     case 'workspace-write':
-      return `Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: ${JSON.stringify(policy.workspaceRoot)}. Some platform temporary areas may also be writable.`
+      return `Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace roots: ${JSON.stringify(policy.workspaceRoots ?? [policy.workspaceRoot])}. Some platform temporary areas may also be writable.`
     case 'danger-full-access':
       return 'Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.'
     /* v8 ignore next 4 -- SandboxMode is a typed same-process closed union; this branch is only the static exhaustiveness guard. */
@@ -163,9 +164,16 @@ export class SandboxPolicyService extends Service {
    */
   resolve(request: SandboxPolicyRequest = {}): SandboxExecutionPolicy {
     const { session } = request
+    // Multi-root widening: a session accounted by a Workspace may write under
+    // every member directory of that workspace (`workspaceRoots`, primary
+    // first), not only the primary root; unaccounted sessions keep the
+    // single-root behavior. Read leniently like dsh-api-workspace-files does:
+    // the registry is optional to this core package and may still be loading.
+    const members = session === undefined ? undefined : this.ctx.get('workspaceRegistry')?.pathsForSession(session.id)
     return {
       mode: request.mode ?? (session === undefined ? undefined : this.overrideOf(session)) ?? this.defaultMode,
       workspaceRoot: resolveWorkspaceRoot(session?.header.cwd ?? this.workspaceRoot),
+      ...members !== undefined && members.length > 0 ? { workspaceRoots: [...members] } : {},
       ...session === undefined ? {} : { sessionId: session.id },
     }
   }

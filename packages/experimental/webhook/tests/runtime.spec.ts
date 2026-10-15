@@ -233,6 +233,7 @@ describe('WebhookRuntime', () => {
       mount: async (_agentCtx: unknown, id: string) => ({ id }),
     } as never)
     ctx.provide('workspaceRegistry', {
+      resolvePrimaryByPath: async () => undefined,
       create: async () => ({
         path: '/workspace',
         attachSession,

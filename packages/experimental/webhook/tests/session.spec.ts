@@ -114,6 +114,9 @@ function harness(options: HarnessOptions = {}): SessionHarness {
       },
     },
     workspaceRegistry: {
+      async resolvePrimaryByPath() {
+        return undefined
+      },
       async create(path: string) {
         calls.push(`workspace:${path}`)
         if (options.failAt === 'workspace') throw new Error('workspace failed')

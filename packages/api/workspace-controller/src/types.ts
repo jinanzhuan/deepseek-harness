@@ -17,8 +17,12 @@ export type { DirectoryEntry, DirectoryListing } from '@deepseek-ai/dsh-host-dir
 /** One durable Workspace projected for browser consumers. */
 export interface WorkspaceView {
   readonly workspaceId: WorkspaceId
-  /** Canonical host directory path. */
+  /** Canonical host directory path of the primary member. */
   readonly path: string
+  /** Every member directory, primary path first. */
+  readonly paths: readonly string[]
+  /** Member directories that do not currently exist on disk; computed at projection time. */
+  readonly missingPaths: readonly string[]
   /** User-visible title. */
   readonly title: string
   /** Sessions accounted to this Workspace in manual order. */
@@ -33,6 +37,10 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface RemoteErrorDetailsMap {
     /** The requested directory cannot back a Workspace. */
     'workspace/invalid-path': { readonly path: string }
+    /** The requested member directory cannot join or leave the Workspace. */
+    'workspace/path-invalid': { readonly workspaceId: WorkspaceId; readonly path: string }
+    /** The requested member directory already belongs to the Workspace. */
+    'workspace/path-exists': { readonly workspaceId: WorkspaceId; readonly path: string }
     /** Another Workspace already uses the requested name. */
     'workspace/name-conflict': { readonly name: string }
     /**
@@ -86,6 +94,18 @@ export interface WorkspaceValue {
 /** Workspace registration deletion. */
 export interface WorkspaceDeleteRequest {
   readonly workspaceId: WorkspaceId
+}
+
+/** Member directory requested for adoption into one Workspace. */
+export interface WorkspaceAddProjectRequest {
+  readonly workspaceId: WorkspaceId
+  readonly path: string
+}
+
+/** Member directory requested for removal from one Workspace. */
+export interface WorkspaceRemoveProjectRequest {
+  readonly workspaceId: WorkspaceId
+  readonly path: string
 }
 
 /** Receipt after one Workspace registration is deleted. */

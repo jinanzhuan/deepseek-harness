@@ -16,7 +16,7 @@ Source: [`packages/workspace/workspace/src/types.ts`](../../packages/workspace/w
 type WorkspaceId = Branded<'WorkspaceId'>
 ```
 
-`WorkspaceId` is a [branded id](core.md#branded-ids). Path identity is separate: `realpathNormalize` (`fs.realpath`; trailing slashes, `..`, and symlinks resolved) is the one uniqueness canon — workspace paths are stored canonicalized, uniqueness is string equality of canonical paths (a symlink to an owned directory collides), and attach-time session cwd checks go through the same canon.
+`WorkspaceId` is a [branded id](core.md#branded-ids). Path identity is separate: `realpathNormalize` (`fs.realpath`; trailing slashes, `..`, and symlinks resolved) is the one canon — workspace paths and member directories are stored canonicalized, member identity is string equality of canonical paths (a symlink spelling of a member collides with it), and attach-time session cwd checks go through the same canon. Registration itself does not dedupe: one directory may head several workspaces or belong to them as a member.
 
 ## The workspace entity
 
@@ -24,22 +24,31 @@ Consumers see only the `Workspace` interface; the implementation stays package-p
 
 ```ts type-equiv
 /**
- * One workspace: a stable id over an existing directory, a display title, and
- * an ordered candidate account of sessions. Membership validates header cwd
- * against the workspace path, but preserves an existing account when its
- * fully qualified cwd is missing. Consumers only see this interface; the
- * implementation stays private.
+ * One workspace: a stable id over an ordered set of member directories, a
+ * display title, and an ordered candidate account of sessions. The first
+ * member is the primary path; membership requires both an id in that account
+ * and a session header whose canonical cwd equals one of the member paths,
+ * but preserves an existing account when its fully qualified cwd is missing.
+ * Consumers only see this interface; the implementation stays private.
  */
 interface Workspace {
   /** Stable record id (generated uuid). */
   readonly id: WorkspaceId
 
   /**
-   * Canonical directory path: the `fs.realpath` of the path given at create
-   * time (trailing slashes, `..`, and symlinks all resolved). Never rewritten
-   * afterwards, even when the directory disappears (see {@link status}).
+   * Canonical primary directory path: the `fs.realpath` of the path given at
+   * create time (trailing slashes, `..`, and symlinks all resolved). Never
+   * rewritten afterwards, even when the directory disappears (see
+   * {@link status}). Always the first element of {@link paths}.
    */
   readonly path: string
+
+  /**
+   * Every member directory, primary path first. Each member grants the same
+   * read/write standing as the primary path; a session whose canonical cwd
+   * equals any member is accounted to this workspace.
+   */
+  readonly paths: readonly string[]
 
   /** Display title. Defaults to the final path segment, or a filesystem root's own spelling; duplicates are allowed. */
   readonly title: string
@@ -71,11 +80,33 @@ interface Workspace {
   setTitle(title: string): Promise<void>
 
   /**
+   * Add one member directory durably. The path is canonicalized through the
+   * same `fs.realpath` canon as the primary path and must name an existing
+   * directory; adding an existing member resolves without writing, aside from
+   * the durable filtered-candidate prune every accepted mutation performs.
+   * @param path - Directory to add, in a fully qualified spelling.
+   * @returns resolution after durability.
+   */
+  addPath(path: string): Promise<void>
+
+  /**
+   * Remove one member directory durably. The primary path cannot be removed —
+   * retitling membership around a new primary is a delete plus create, not a
+   * member edit. Removing a non-member resolves without writing, aside from
+   * the durable filtered-candidate prune every accepted mutation performs. A
+   * member whose directory was deleted remains removable.
+   * @param path - Member directory to remove, in a fully qualified spelling.
+   * @returns resolution after durability.
+   */
+  removePath(path: string): Promise<void>
+
+  /**
    * Prepend a session to this workspace's candidate account. An already
    * accounted id resolves without writing, aside from the durable
    * filtered-candidate prune every accepted mutation performs. A new id's
    * live or persisted
-   * header cwd must resolve to an existing directory equal to {@link path};
+   * header cwd must resolve to an existing directory equal to one of
+   * {@link paths};
    * unknown ids, missing or invalid cwd values, and mismatches reject without
    * writing.
    * @param sessionId - The session to record.
@@ -121,7 +152,7 @@ Ownership truth is the record's ordered `sessionIds`, never derived from session
 
 ## The registry: `ctx.workspaceRegistry`
 
-`WorkspaceRegistry` ([signatures](#ctxworkspaceregistry--workspaceregistry)) owns registration and resolution. `create(path, title?)` requires a fully qualified path, canonicalizes it, rejects a nonexistent path (the original `ENOENT`) or a non-directory, returns the existing entity unchanged when the canonical path is already owned, and otherwise creates a record with `title ?? defaultWorkspaceTitle(path)` prepended to the durable registry order (different canonical paths may share a display title, and a path with no final segment uses its root spelling). `get(id)` and the ordered `list()` are synchronous cache reads; `resolveByPath(path)` applies the same fully qualified realpath canon without creating. `delete(id)` removes only the registration, order entry, and session account — the directory, user files, live sessions, and persisted logs are never touched, so those sessions become Ungrouped ([reference](../../packages/workspace/workspace/README.md)); unknown ids return `false`. Create and delete persist a pending-mutation marker before their two writes (record + order) can diverge; startup resolves exactly the marked mutation — by deleting the marked table row, which completes an interrupted delete and rolls back an interrupted create (the registration is re-creatable, so rollback is the safe direction) — and an unmarked order/table mismatch fails loud as corruption.
+`WorkspaceRegistry` ([signatures](#ctxworkspaceregistry--workspaceregistry)) owns registration and resolution. `create(path, title?)` requires a fully qualified path, canonicalizes it, rejects a nonexistent path (the original `ENOENT`) or a non-directory, always registers anew — even when the canonical path already heads or belongs to another workspace — creating a record with `title ?? defaultWorkspaceTitle(path)` prepended to the durable registry order (different canonical paths may share a display title, and a path with no final segment uses its root spelling). `get(id)` and the ordered `list()` are synchronous cache reads; `resolveByPath(path)` applies the same fully qualified realpath canon without creating, preferring a primary owner over a member sharer; `resolvePrimaryByPath(path)` matches primary ownership only. `addPath(id, path)` and `removePath(id, path)` edit the member set durably — the primary path cannot be removed — and `pathsForSession(sessionId)` answers the member set of the workspace accounting a session. `delete(id)` removes only the registration, order entry, and session account — the directory, user files, live sessions, and persisted logs are never touched, so those sessions become Ungrouped ([reference](../../packages/workspace/workspace/README.md)); unknown ids return `false`. Create and delete persist a pending-mutation marker before their two writes (record + order) can diverge; startup resolves exactly the marked mutation — by deleting the marked table row, which completes an interrupted delete and rolls back an interrupted create (the registration is re-creatable, so rollback is the safe direction) — and an unmarked order/table mismatch fails loud as corruption.
 
 Sessions get their cwd at create time from whoever creates them, not from this registry — the API gateway resolves a new session's cwd from the chosen workspace's `path` (falling back to an explicit or default cwd), creates the session so the cwd lands in its immutable [`SessionHeader`](persistence.md#sessionheader--metadata-beside-the-log), then calls `attachSession`, which re-validates that stored header cwd against the workspace path. On the first successful start, the registry bootstraps history from persisted headers alone (`id`, `cwd`, `createdAt` — never event bodies), grouping sessions with a valid canonical cwd into per-directory workspaces, newest first; the initialized marker is written last so an interrupted bootstrap resumes safely. The bootstrap is one-time: cwd-less legacy sessions stay Ungrouped, and sessions created afterwards join a workspace only through `attachSession`.
 
@@ -314,7 +345,9 @@ Host service backing the generated `ctx.remote.workspace` namespace.
 
 ```ts cordis-catalog
 /**
- * Create or idempotently resolve one Workspace over an existing directory.
+ * Create one Workspace over an existing directory — always a new
+ * registration, even when the directory already heads or belongs to another
+ * Workspace (directories are shareable; adding is an explicit user act).
  * @param request - directory path to register.
  * @returns the Workspace and whether this call created it.
  */
@@ -343,6 +376,20 @@ Host service backing the generated `ctx.remote.workspace` namespace.
  * @returns deletion confirmation.
  */
 @Remote('delete') delete(request: WorkspaceDeleteRequest): Promise<WorkspaceDeleteValue>
+
+/**
+ * Add one member directory to a Workspace.
+ * @param request - Workspace identity and directory path.
+ * @returns the updated Workspace projection.
+ */
+@Remote('addProject') addProject(request: WorkspaceAddProjectRequest): Promise<WorkspaceValue>
+
+/**
+ * Remove one member directory from a Workspace.
+ * @param request - Workspace identity and member path.
+ * @returns the updated Workspace projection.
+ */
+@Remote('removeProject') removeProject(request: WorkspaceRemoveProjectRequest): Promise<WorkspaceValue>
 
 /**
  * Move one Workspace within the registry display order.
@@ -469,15 +516,17 @@ Durable workspace registry. Startup waits for `sessionPersistence`, builds one c
 
 ```ts cordis-catalog
 /**
- * Create or reuse a workspace for an existing directory. The fully qualified
- * path is canonicalized through `fs.realpath`; a relative, nonexistent, or
- * non-directory path rejects. Repeated calls for the same canonical path
- * return the existing entity without changing its title.
+ * Create a workspace for an existing directory — always a new registration,
+ * even when the directory already heads or belongs to another workspace:
+ * adding a workspace is an explicit user act, and directories are meant to
+ * be shareable across workspaces. The fully qualified path is canonicalized
+ * through `fs.realpath`; a relative, nonexistent, or non-directory path
+ * rejects.
  * A newly created workspace is prepended to the durable registry order.
  * Different canonical paths may share a display title.
  * @param path - Existing directory to own, in a fully qualified path spelling.
  * @param title - Display title used only when a new record is created.
- * @returns the existing or newly durable workspace.
+ * @returns the newly durable workspace.
  */
 async create(path: string, title?: string): Promise<Workspace>
 
@@ -582,11 +631,56 @@ unpinSession(sessionId: SessionId): Promise<void>
 /**
  * Resolve by canonical directory path without creating or mutating a
  * workspace. A missing path rejects during `realpath`; an existing unowned
- * directory returns `undefined`.
+ * directory returns `undefined`. A path that is one workspace's primary and
+ * another's member resolves to the primary owner. When several workspaces
+ * share the same primary path (adding a workspace always creates), the
+ * first in registry order answers — path lookup is inherently ambiguous
+ * then; callers needing every owner must scan `list()` themselves.
  * @param path - Existing directory path in a fully qualified spelling.
  * @returns the workspace owning the canonical path, when one exists.
  */
 async resolveByPath(path: string): Promise<Workspace | undefined>
+
+/**
+ * Resolve by canonical path against primary ownership only. Retained for
+ * callers that distinguish owning from merely sharing a directory; with
+ * duplicate primaries the first in registry order answers.
+ * @param path - Existing directory path in a fully qualified spelling.
+ * @returns the workspace whose primary path is the canonical path, when one exists.
+ */
+async resolvePrimaryByPath(path: string): Promise<Workspace | undefined>
+
+/**
+ * Add one member directory to a workspace. The directory must exist. Member
+ * membership is freely shared: the same directory may be a member of several
+ * workspaces — or another workspace's primary path, in which case
+ * {@link resolveByPath} still prefers the primary owner. Member edits go
+ * through the operation queue like every other durable mutation.
+ * @param id - Workspace to widen.
+ * @param path - Directory to add, in a fully qualified spelling.
+ * @returns resolution after durability.
+ */
+async addPath(id: WorkspaceId, path: string): Promise<void>
+
+/**
+ * Remove one member directory from a workspace. The primary path cannot be
+ * removed; removing a non-member is an idempotent no-op. A member whose
+ * directory was deleted remains removable through deepest-ancestor
+ * canonicalization.
+ * @param id - Workspace to narrow.
+ * @param path - Member directory to remove, in a fully qualified spelling.
+ * @returns resolution after durability.
+ */
+async removePath(id: WorkspaceId, path: string): Promise<void>
+
+/**
+ * Every member directory of the workspace accounting one session, primary
+ * path first, for multi-root file surfaces. Sessions no workspace accounts
+ * — or an unstarted registry — answer `undefined`.
+ * @param sessionId - Session whose owning workspace is asked.
+ * @returns the member paths, or `undefined` when unaccounted.
+ */
+pathsForSession(sessionId: SessionId): readonly string[] | undefined
 ```
 
 Types: [SessionId](core.md)

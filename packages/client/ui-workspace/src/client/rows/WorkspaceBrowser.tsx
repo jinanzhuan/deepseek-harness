@@ -36,7 +36,8 @@ import {
   deriveFlat, deriveGroups, deriveSearchResults, orderByRecency, owningGroupKey, owningParentFolder,
   pinCurrentBlank, reconcileManualOrder, sessionMemberIds, UNGROUPED_KEY,
 } from '../tree.ts'
-import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
+import { memberBaseName, ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
+import type { MemberMenu } from './Rows.tsx'
 import { AnimatedRows } from './AnimatedRows.tsx'
 import { FLAT_SESSION_ORDER_KEY, type SessionGroupBy } from '../stores.ts'
 import { WorkspacePickFlow } from '../WorkspacePicker.tsx'
@@ -291,6 +292,12 @@ type SessionTreeProps = Pick<
   onDeleteRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
   /** Open the rename dialog from a row title double-click. */
   onSessionRenameRequest: (sessionId: SessionNode['id'], currentTitle: string) => void
+  /** Open the add-project pick flow targeting a real Workspace group. */
+  onAddProjectRequest?: ((workspaceId: WorkspaceId) => void) | undefined
+  /** Open the member-removal confirmation for a real Workspace group. */
+  onRemoveProject?: ((workspaceId: WorkspaceId, path: string) => void) | undefined
+  /** Member-row verbs shared by every group (removal routes through onRemoveProject). */
+  memberActions?: MemberMenu | undefined
   /** One Session chosen from search that must be exposed and scrolled into view. */
   revealSessionId?: SessionId | undefined
   /** Acknowledge that the chosen Session row has been revealed. */
@@ -319,6 +326,7 @@ function SessionTree({
   rowState, onLeaveArchivedOnly,
   workspaceReady, animationResetKey, usePanelInfo,
   onRenameRequest, onDeleteRequest, onSessionRenameRequest,
+  onAddProjectRequest, onRemoveProject, memberActions,
   renderSlot,
   insertWorkspaceBefore,
   nestWorkspaces, groupExpansion, setGroupExpanded,
@@ -481,6 +489,9 @@ function SessionTree({
     const visible = watermarkRows(group.sessions, watermark)
     const sessionsExpanded = visible.hiddenCount === 0
     rowKeys.push(`workspace:${group.key}`)
+    if (group.expanded && group.paths !== undefined && group.paths.length > 1) {
+      for (const memberPath of group.paths) rowKeys.push(`member:${group.key}:${memberPath}`)
+    }
     const childRows = group.expanded ? children.map(child => renderGroup(child, depth + 1)) : []
     const sessions = visible.rows
     for (const node of sessions) rowKeys.push(`session:${node.id}`)
@@ -571,9 +582,32 @@ function SessionTree({
             }
           }}
           drag={workspaceDragProps}
+          {...memberActions === undefined || group.workspaceId === undefined
+            ? {}
+            : {
+              memberMenu: {
+                showInExplorer: memberActions.showInExplorer,
+                copyPath: memberActions.copyPath,
+                reveal: memberActions.reveal,
+                remove: onRemoveProject === undefined
+                  ? undefined
+                  : (path: string) => {
+                    /* v8 ignore next -- narrowing guard: memberMenu exists only for real-workspace groups. */
+                    if (group.workspaceId !== undefined) onRemoveProject(group.workspaceId, path)
+                  },
+              },
+            }}
           actions={group.workspaceId === undefined
             ? undefined
             : {
+              ...onAddProjectRequest === undefined
+                ? {}
+                : {
+                  addProject: () => {
+                    /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
+                    if (group.workspaceId !== undefined) onAddProjectRequest(group.workspaceId)
+                  },
+                },
               rename: () => {
               /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
                 if (group.workspaceId !== undefined) onRenameRequest(group.workspaceId, group.label)
@@ -911,6 +945,10 @@ export function WorkspaceBrowser({
   insertWorkspaceBefore,
   unarchiveSession,
   createWorkspace,
+  addProject,
+  removeProject,
+  canRevealWorkspacePath,
+  revealWorkspacePath,
   searchSessions,
   searchResultLimit,
   useDirectoryFlow,
@@ -1263,6 +1301,83 @@ export function WorkspaceBrowser({
     })
   }
 
+  // Multi-root: the Workspace a "add project folder" menu pick targets.
+  // Cleared by the pick flow itself once the menu, the directory flow, and
+  // the error dialog are all closed — never from the flow's onClose, which
+  // also fires for the internal menu-to-dialog transition.
+  const [projectTarget, setProjectTarget] = useState<WorkspaceId | null>(null)
+  const requestAddProject = directoryFlowAvailable && addProject !== undefined
+    ? (workspaceId: WorkspaceId) => {
+      setProjectTarget(workspaceId)
+      requestAddWorkspace()
+    }
+    : undefined
+  // Multi-root: removing a member directory asks first (the files stay on
+  // disk; sessions using it as their cwd get a warning line). The Modal
+  // below drives these three pieces of state.
+  const [removeProjectTarget, setRemoveProjectTarget] = useState<{ workspaceId: WorkspaceId; path: string } | null>(null)
+  const [removingProject, setRemovingProject] = useState(false)
+  const [removeProjectError, setRemoveProjectError] = useState<string | null>(null)
+  const requestRemoveProject = removeProject === undefined
+    ? undefined
+    : (workspaceId: WorkspaceId, path: string) => {
+      setRemoveProjectTarget({ workspaceId, path })
+      setRemoveProjectError(null)
+    }
+  const closeRemoveProject = () => {
+    if (removingProject) return
+    setRemoveProjectTarget(null)
+    setRemoveProjectError(null)
+  }
+  const confirmRemoveProject = () => {
+    /* v8 ignore next -- the Modal is absent without a target and its button is disabled while removing. */
+    if (removingProject || removeProjectTarget === null || removeProject === undefined) return
+    setRemovingProject(true)
+    setRemoveProjectError(null)
+    removeProject(removeProjectTarget.workspaceId, removeProjectTarget.path).then(() => {
+      setRemovingProject(false)
+      setRemoveProjectTarget(null)
+    }).catch((reason: unknown) => {
+      setRemovingProject(false)
+      setRemoveProjectError(reason instanceof Error ? reason.message : String(reason))
+    })
+  }
+  const removeProjectInUse = removeProjectTarget === null
+    ? 0
+    : list.ids.filter(id => list.byId[id]?.cwd === removeProjectTarget.path).length
+  // Member-row context menu: jump to the Explorer view (the dsh-explorer
+  // plugin listens for this window event), copy the path, reveal it in the
+  // system file manager (only when the Host supports opening paths), and
+  // removal through the confirmation Modal above.
+  const [memberRevealSupported, setMemberRevealSupported] = useState(false)
+  useEffect(() => {
+    if (canRevealWorkspacePath === undefined) return undefined
+    let live = true
+    Promise.resolve(canRevealWorkspacePath()).then((ok) => {
+      if (live) setMemberRevealSupported(ok)
+    }, () => undefined)
+    return () => { live = false }
+  }, [canRevealWorkspacePath])
+  const memberActions = useMemo((): MemberMenu => ({
+    showInExplorer: (path) => {
+      window.dispatchEvent(new CustomEvent('dsh-explorer:reveal', { detail: { path } }))
+    },
+    copyPath: (path) => {
+      try {
+        void navigator.clipboard.writeText(path)
+      } catch {
+        // clipboard unavailable: the menu action degrades to a no-op
+      }
+    },
+    reveal: memberRevealSupported && revealWorkspacePath !== undefined
+      ? (path) => {
+        revealWorkspacePath(path).catch((reason: unknown) => {
+          console.warn('reveal workspace path rejected:', reason)
+        })
+      }
+      : undefined,
+  }), [memberRevealSupported, revealWorkspacePath])
+
   return (
     <div className={clsx(css.root, !wide && css.rail)}>
       <div className={css.sectionHeader}>
@@ -1372,6 +1487,9 @@ export function WorkspaceBrowser({
           addOnly
           onBusyChange={setDirectoryBusy}
           side="right"
+          projectTarget={projectTarget}
+          addProject={addProject}
+          onClearProjectTarget={() => { setProjectTarget(null) }}
           onPick={(workspaceId) => {
             closeAddWorkspace()
             startSession(workspaceId, { clearPreviousDraft: false })
@@ -1462,6 +1580,9 @@ export function WorkspaceBrowser({
                 onSessionRevealed={acknowledgeSessionReveal}
                 home={home}
                 t={t}
+                onAddProjectRequest={requestAddProject}
+                onRemoveProject={requestRemoveProject}
+                memberActions={memberActions}
                 onRenameRequest={(workspaceId, displayTitle) => {
                   setRenameTarget({
                     workspaceId,
@@ -1537,6 +1658,37 @@ export function WorkspaceBrowser({
       >
         {deleting && <div className={css.deleteStatus} role="status">{t('delete.pending')}</div>}
         {deleteError !== null && <div className={css.renameError} role="alert">{deleteError}</div>}
+      </Modal>
+
+      <Modal
+        open={removeProjectTarget !== null}
+        onClose={closeRemoveProject}
+        closeLabel={t('close')}
+        title={t('member.remove.title')}
+        {...removeProjectTarget === null
+          ? {}
+          : { description: t('member.remove.desc', { name: memberBaseName(removeProjectTarget.path) }) }}
+        footer={(
+          <>
+            <Button variant="outline" disabled={removingProject} onClick={closeRemoveProject}>{t('cancel')}</Button>
+            <Button
+              variant="outline"
+              className={css.deleteAction}
+              disabled={removingProject}
+              onClick={confirmRemoveProject}
+            >
+              {t('member.remove.confirm')}
+            </Button>
+          </>
+        )}
+      >
+        {removeProjectInUse > 0 && (
+          <div className={css.deleteStatus} role="alert">
+            {t(removeProjectInUse === 1 ? 'member.remove.inUse.one' : 'member.remove.inUse.other', { n: removeProjectInUse })}
+          </div>
+        )}
+        {removingProject && <div className={css.deleteStatus} role="status">{t('member.remove.pending')}</div>}
+        {removeProjectError !== null && <div className={css.renameError} role="alert">{removeProjectError}</div>}
       </Modal>
     </div>
   )

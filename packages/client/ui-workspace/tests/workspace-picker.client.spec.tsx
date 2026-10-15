@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -11,7 +12,7 @@ import { allowAllAccess, bindSnapshotSelector, makeTranslate } from '@deepseek-a
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { DirectoryFlowOwnerProps, WorkspacePickerProps } from '../src/client/contract/slots.ts'
-import { WorkspacePicker } from '../src/client/WorkspacePicker.tsx'
+import { WorkspacePicker, WorkspacePickFlow } from '../src/client/WorkspacePicker.tsx'
 import { zh } from '../src/client/locales.ts'
 
 // Every fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
@@ -27,7 +28,8 @@ const t: WorkspacePickerProps['t'] = makeTranslate(zh, commonZh)
 const wid = (id: string) => id as WorkspaceId
 function workspace(id: string, title = id): WorkspaceView {
   return {
-    workspaceId: wid(id), path: `/projects/${id}`, title, sessionIds: [],
+    workspaceId: wid(id), path: `/projects/${id}`, paths: [`/projects/${id}`], missingPaths: [],
+    title, sessionIds: [],
     createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
   }
 }
@@ -123,6 +125,98 @@ function mount(
 function chooseAdd(): void {
   fireEvent.click(screen.getByRole('menuitem', { name: '添加工作区…' }))
 }
+
+describe('WorkspacePickFlow project target', () => {
+  /** Mount the core flow with a multi-root add-project target. */
+  function mountFlow(options: {
+    addProject?: (workspaceId: WorkspaceId, path: string) => Promise<void>
+    items?: readonly WorkspaceView[]
+    addOnly?: boolean
+  } = {}) {
+    const onPick = vi.fn()
+    const onClose = vi.fn()
+    const onClearProjectTarget = vi.fn()
+    const createWorkspace = vi.fn()
+    const { probe } = flowProbe()
+    const renderDirectoryFlow = (owner: DirectoryFlowOwnerProps): ReactNode => {
+      probe.owner = owner
+      return owner.open ? <div data-testid="directory-flow" data-busy={owner.busy} /> : null
+    }
+    const occupancy = occupancySource()
+    render(
+      <WorkspacePickFlow
+        t={t}
+        open
+        anchorRef={anchor()}
+        useWorkspaces={hook(workspaceState(options.items ?? [workspace('alpha', 'Alpha')]))}
+        createWorkspace={createWorkspace}
+        useDirectoryFlow={occupancy.useDirectoryFlow}
+        renderDirectoryFlow={renderDirectoryFlow}
+        onPick={onPick}
+        onClose={onClose}
+        addOnly={options.addOnly ?? false}
+        projectTarget={wid('alpha')}
+        addProject={options.addProject ?? vi.fn(async () => {})}
+        onClearProjectTarget={onClearProjectTarget}
+      />,
+    )
+    return { onPick, onClose, onClearProjectTarget, createWorkspace, probe }
+  }
+
+  it('adopts the picked directory into the target Workspace instead of creating one', async () => {
+    const addProject = vi.fn(async () => {})
+    const b = mountFlow({ addProject })
+    chooseAdd()
+    expect(screen.getByTestId('directory-flow')).toBeTruthy()
+    await act(async () => { b.probe.owner!.onPicked('/projects/lib') })
+    await waitFor(() => { expect(b.onPick).toHaveBeenCalledWith(wid('alpha')) })
+    expect(addProject).toHaveBeenCalledWith(wid('alpha'), '/projects/lib')
+    expect(b.createWorkspace).not.toHaveBeenCalled()
+    expect(b.onClearProjectTarget).toHaveBeenCalledOnce()
+    await waitFor(() => { expect(screen.queryByTestId('directory-flow')).toBeNull() })
+  })
+
+  it('localizes a duplicate add refusal and releases the target when the error is dismissed', async () => {
+    const failure = Object.assign(
+      new Error('workspace add project path failed: workspace/path-exists: already a member'),
+      { code: 'workspace/path-exists' },
+    )
+    const addProject = vi.fn(async () => { throw failure })
+    const b = mountFlow({ addProject })
+    chooseAdd()
+    await act(async () => { b.probe.owner!.onPicked('/projects/lib') })
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: '无法打开文件夹' })).toBeTruthy()
+    })
+    expect(screen.getByRole('alert').textContent).toBe('该目录已在工作区中，无需重复添加。')
+    expect(b.onPick).not.toHaveBeenCalled()
+    // The target survives into Choose again…
+    fireEvent.click(screen.getByRole('button', { name: '重新选择' }))
+    expect(b.onClearProjectTarget).not.toHaveBeenCalled()
+    expect(b.probe.owner!.open).toBe(true)
+    // …and the flow's own cancel releases it.
+    act(() => { b.probe.owner!.onCancel() })
+    expect(b.onClearProjectTarget).toHaveBeenCalledOnce()
+  })
+
+  it('releases the target when the menu is dismissed without the flow ever opening, but not on the internal menu-to-dialog transition', () => {
+    const b = mountFlow({ addOnly: false })
+    // The internal transition: picking the add entry closes the menu AND
+    // opens the flow — the target must survive.
+    chooseAdd()
+    expect(b.onClose).toHaveBeenCalled()
+    expect(b.onClearProjectTarget).not.toHaveBeenCalled()
+    expect(screen.getByTestId('directory-flow')).toBeTruthy()
+  })
+
+  it('releases the target when the menu closes before any flow opened', () => {
+    const b = mountFlow({ addOnly: false })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(b.onClose).toHaveBeenCalled()
+    expect(b.onClearProjectTarget).toHaveBeenCalledOnce()
+    expect(screen.queryByTestId('directory-flow')).toBeNull()
+  })
+})
 
 describe('WorkspacePicker', () => {
   it('lists same-title Workspaces separately and forwards the selected id', () => {

@@ -100,7 +100,7 @@ const NS = 'workspace'
  * declaration through `slots.inject()` instead of assuming order.
  */
 export const inject = [
-  'slots', 'sessions', 'workspaces', 'locale', 'remote', 'remote.directoryPicker', 'layout', 'shortcuts', 'remoteAccess',
+  'slots', 'sessions', 'workspaces', 'locale', 'remote', 'remote.directoryPicker', 'remote.session', 'layout', 'shortcuts', 'remoteAccess',
 ]
 
 /**
@@ -277,6 +277,16 @@ export function apply(ctx: Context): void {
     },
     unarchiveSession: async (sessionId) => { await uiWorkspace.unarchiveSession(sessionId) },
     createWorkspace: input => workspaces.create(input),
+    addProject: async (workspaceId, path) => { await workspaces.addProject(workspaceId, path) },
+    removeProject: async (workspaceId, path) => { await workspaces.removeProject(workspaceId, path) },
+    canRevealWorkspacePath: async () => {
+      const result = await ctx.remote.session.canOpenWorkspacePath()
+      return result.ok && result.value
+    },
+    revealWorkspacePath: async (path) => {
+      const result = await ctx.remote.session.openWorkspacePath({ path, action: 'reveal' })
+      return result.ok
+    },
     requestSearch: shortcutControls.search,
     requestAddWorkspace: shortcutControls.add,
     closeAddWorkspace: shortcutControls.closeAdd,

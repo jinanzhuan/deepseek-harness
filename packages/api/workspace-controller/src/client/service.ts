@@ -67,6 +67,20 @@ export interface IWorkspaces {
    */
   rename(workspaceId: WorkspaceId, title: string): Promise<WorkspaceView>
   /**
+   * Add one member directory to a Workspace.
+   * @param workspaceId - target Workspace.
+   * @param path - existing absolute directory to add.
+   * @returns the updated Workspace.
+   */
+  addProject(workspaceId: WorkspaceId, path: string): Promise<WorkspaceView>
+  /**
+   * Remove one member directory from a Workspace; the primary path cannot be removed.
+   * @param workspaceId - target Workspace.
+   * @param path - member directory to remove.
+   * @returns the updated Workspace.
+   */
+  removeProject(workspaceId: WorkspaceId, path: string): Promise<WorkspaceView>
+  /**
    * Delete a Workspace registration without deleting Sessions or files.
    * @param workspaceId - target Workspace.
    */
@@ -145,6 +159,18 @@ export class WorkspaceController extends Service implements IWorkspaces {
     return result.value.workspace
   }
 
+  async addProject(workspaceId: WorkspaceId, path: string): Promise<WorkspaceView> {
+    const result = await this.model.addProject(workspaceId, path)
+    if (!result.ok) throw commandError('add project path', result.error)
+    return result.value.workspace
+  }
+
+  async removeProject(workspaceId: WorkspaceId, path: string): Promise<WorkspaceView> {
+    const result = await this.model.removeProject(workspaceId, path)
+    if (!result.ok) throw commandError('remove project path', result.error)
+    return result.value.workspace
+  }
+
   async delete(workspaceId: WorkspaceId): Promise<void> {
     const result = await this.model.delete(workspaceId)
     if (!result.ok) throw commandError('delete', result.error)
@@ -186,6 +212,10 @@ export class WorkspaceController extends Service implements IWorkspaces {
   }
 }
 
-function commandError(operation: string, failure: RemoteFailure): Error {
-  return new Error(`workspace ${operation} failed: ${failure.code}: ${failure.message}`)
+/** A command failure that still carries the Host failure code for localized handling (e.g. `workspace/path-exists`). */
+function commandError(operation: string, failure: RemoteFailure): Error & { readonly code: string } {
+  return Object.assign(
+    new Error(`workspace ${operation} failed: ${failure.code}: ${failure.message}`),
+    { code: failure.code },
+  )
 }

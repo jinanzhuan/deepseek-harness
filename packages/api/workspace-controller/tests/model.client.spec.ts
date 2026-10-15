@@ -3,6 +3,7 @@ import {
   ClientWorkspaceModel, type WorkspaceRemote,
 } from '../src/client/index.ts'
 import type {
+  WorkspaceAddProjectRequest,
   WorkspaceArchiveSessionRequest,
   WorkspaceArchiveValue,
   WorkspaceCreateRequest,
@@ -15,6 +16,7 @@ import type {
   WorkspaceOrderValue,
   WorkspacePinSessionRequest,
   WorkspacePinValue,
+  WorkspaceRemoveProjectRequest,
   WorkspaceRenameRequest,
   WorkspaceUnarchiveSessionRequest,
   WorkspaceUnpinSessionRequest,
@@ -37,6 +39,8 @@ function workspace(
   return {
     workspaceId: wid(id),
     path: `/w/${id}`,
+    paths: [`/w/${id}`],
+    missingPaths: [],
     title: id,
     sessionIds,
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -77,6 +81,12 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
     Promise.resolve(remoteOk({ workspace: { ...workspace(String(request.workspaceId)), title: request.title } }))
   onDelete: (_request: WorkspaceDeleteRequest) => Promise<RemoteResult<WorkspaceDeleteValue>> = () =>
     Promise.resolve(remoteOk({ deleted: true }))
+  onAddProject: (request: WorkspaceAddProjectRequest) => Promise<RemoteResult<WorkspaceValue>> = request =>
+    Promise.resolve(remoteOk({
+      workspace: { ...workspace(String(request.workspaceId)), paths: [`/w/${String(request.workspaceId)}`, request.path] },
+    }))
+  onRemoveProject: (request: WorkspaceRemoveProjectRequest) => Promise<RemoteResult<WorkspaceValue>> = request =>
+    Promise.resolve(remoteOk({ workspace: workspace(String(request.workspaceId)) }))
   onInsertBefore: (
     request: WorkspaceInsertBeforeRequest,
   ) => Promise<RemoteResult<WorkspaceOrderValue>> = request =>
@@ -116,6 +126,16 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
   delete(request: WorkspaceDeleteRequest): Promise<RemoteResult<WorkspaceDeleteValue>> {
     this.record('delete', request)
     return this.onDelete(request)
+  }
+
+  addProject(request: WorkspaceAddProjectRequest): Promise<RemoteResult<WorkspaceValue>> {
+    this.record('addProject', request)
+    return this.onAddProject(request)
+  }
+
+  removeProject(request: WorkspaceRemoveProjectRequest): Promise<RemoteResult<WorkspaceValue>> {
+    this.record('removeProject', request)
+    return this.onRemoveProject(request)
   }
 
   insertBefore(request: WorkspaceInsertBeforeRequest): Promise<RemoteResult<WorkspaceOrderValue>> {
@@ -188,6 +208,32 @@ describe('ClientWorkspaceModel', () => {
       new RemoteError('gateway/bad-request', 'choose a folder', {}),
     ))
     await expect(model.initializeDefault()).resolves.toMatchObject({ ok: false })
+    expect(model.getSnapshot()).toBe(before)
+  })
+
+  it('merges addProject and removeProject unary echoes immediately', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    baseline(model, [workspace('one')])
+
+    const added = await model.addProject(wid('one'), '/w/member')
+    expect(added.ok).toBe(true)
+    expect(remote.calls).toContainEqual({ method: 'addProject', request: { workspaceId: 'one', path: '/w/member' } })
+    expect(model.getSnapshot().items[0]?.paths).toEqual(['/w/one', '/w/member'])
+
+    const removed = await model.removeProject(wid('one'), '/w/member')
+    expect(removed.ok).toBe(true)
+    expect(remote.calls).toContainEqual({ method: 'removeProject', request: { workspaceId: 'one', path: '/w/member' } })
+    expect(model.getSnapshot().items[0]?.paths).toEqual(['/w/one'])
+
+    // A refused add leaves the projection untouched.
+    remote.onAddProject = () => Promise.resolve(workspaceError(
+      new RemoteError('workspace/path-exists', 'already a member', { workspaceId: wid('one'), path: '/w/member' }),
+    ))
+    const before = model.getSnapshot()
+    await expect(model.addProject(wid('one'), '/w/member')).resolves.toMatchObject({
+      ok: false, error: { code: 'workspace/path-exists' },
+    })
     expect(model.getSnapshot()).toBe(before)
   })
 

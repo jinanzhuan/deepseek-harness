@@ -233,6 +233,8 @@
         {
           "workspaceId": "fx-ws-fixture",
           "path": "/tmp/fixture",
+          "paths": ["/tmp/fixture"],
+          "missingPaths": [],
           "title": "fixture",
           "sessionIds": [
             "fx-alpha",
@@ -245,6 +247,8 @@
         {
           "workspaceId": "fx-ws-home",
           "path": "/home/fixture/Documents/project",
+          "paths": ["/home/fixture/Documents/project"],
+          "missingPaths": [],
           "title": "project",
           "sessionIds": [],
           "createdAt": "2026-09-13T03:02:55.884Z",

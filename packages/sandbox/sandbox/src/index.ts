@@ -43,6 +43,13 @@ export interface SandboxExecutionPolicy {
   /** Absolute root directory `workspace-write` may write under. */
   workspaceRoot: string
   /**
+   * Every member directory of the calling session's workspace, primary root
+   * first, when the session is accounted by a multi-root Workspace. Absent
+   * keeps the single-root meaning of {@link workspaceRoot}: agentless calls
+   * and unaccounted sessions are unchanged.
+   */
+  workspaceRoots?: readonly string[]
+  /**
    * Opaque identity of the calling session (the branded `dsh-session`
    * SessionId). Backends key per-session state off it (e.g. windows-acl gives
    * each live session/workspace pair a random private temp directory and SID,

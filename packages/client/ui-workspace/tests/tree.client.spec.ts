@@ -39,9 +39,10 @@ const withMain = (state: SessionListState, id: SessionId): SessionListState => (
     [id]: { ...state.byId[id]!, retainedBy: { ...state.byId[id]!.retainedBy, mainView: 1 } },
   },
 })
-const workspace = (id: string, sessionIds: string[], title = id): WorkspaceView => ({
-  workspaceId: wid(id), path: `/projects/${id}`, title,
+const workspace = (id: string, sessionIds: string[], title = id, overrides: Partial<WorkspaceView> = {}): WorkspaceView => ({
+  workspaceId: wid(id), path: `/projects/${id}`, paths: [`/projects/${id}`], missingPaths: [], title,
   sessionIds: sessionIds.map(sid), createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  ...overrides,
 })
 const view = (expandedGroups: readonly string[] = [], ungroupedOrder?: readonly string[]) => ({
   expandedGroups,
@@ -70,6 +71,20 @@ describe('owningGroupKey', () => {
     const workspaces = [workspace('first', ['owned'])]
     expect(owningGroupKey(workspaces, sid('owned'))).toBe('first')
     expect(owningGroupKey(workspaces, sid('loose'))).toBe(UNGROUPED_KEY)
+  })
+})
+
+describe('member path projection', () => {
+  it('carries Workspace member paths and missing markers through both derivation levels', () => {
+    const workspaces = [
+      workspace('multi', [], 'Multi', { paths: ['/projects/multi', '/projects/lib'], missingPaths: ['/projects/lib'] }),
+      workspace('plain', []),
+    ]
+    const groups = deriveGroups(list(), workspaces, noRows, noAttention, view(['multi', 'plain']))
+    expect(groups[0]).toMatchObject({
+      key: 'multi', paths: ['/projects/multi', '/projects/lib'], missingPaths: ['/projects/lib'],
+    })
+    expect(groups[1]).toMatchObject({ key: 'plain', paths: ['/projects/plain'], missingPaths: [] })
   })
 })
 

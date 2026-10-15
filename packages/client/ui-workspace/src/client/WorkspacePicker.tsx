@@ -9,7 +9,7 @@
  * occupant's own create-folder affordance already covers creating one.
  */
 import type { ReactNode, RefObject } from 'react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Button, IconFolderCloseRegular, IconPlusOutlineRegular, Menu, Modal, type MenuEntry,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -51,6 +51,15 @@ export interface WorkspacePickFlowProps {
   side?: 'bottom' | 'top' | 'right'
   /** Currently active workspace (trailing check in the picker list). */
   selectedId?: WorkspaceId | undefined
+  /**
+   * Multi-root target: when set (with `addProject`), a picked directory joins
+   * this Workspace as a member instead of creating a new Workspace.
+   */
+  projectTarget?: WorkspaceId | null | undefined
+  /** Add one member directory to a Workspace; its rejection may carry a Host failure code. */
+  addProject?: ((workspaceId: WorkspaceId, path: string) => Promise<void>) | undefined
+  /** Release the add-project target at explicit flow endpoints (picked, cancelled, error dismissed). */
+  onClearProjectTarget?: (() => void) | undefined
 }
 
 /**
@@ -72,6 +81,9 @@ export function WorkspacePickFlow({
   onBusyChange,
   side = 'bottom',
   selectedId,
+  projectTarget = null,
+  addProject,
+  onClearProjectTarget,
 }: WorkspacePickFlowProps) {
   const workspaceSnapshot = useWorkspaces(state => state)
   const workspaces = workspaceSnapshot.items
@@ -89,6 +101,15 @@ export function WorkspacePickFlow({
   // selection or adoption.
   const flowBusy = flowOpen || pickingFolder
   useEffect(() => { onBusyChange?.(flowBusy) }, [flowBusy, onBusyChange])
+  // The add-project target is released only at explicit flow endpoints
+  // (picked, cancelled, error dismissed) or when the pick menu is dismissed
+  // without the flow ever opening — tracked by flowOpenedRef, because the
+  // menu's onClose ALSO fires for the internal transition into the directory
+  // dialog, and a time/state-based clear races it: the store-driven menu
+  // close and setFlowOpen(true) do not land in the same render, so a
+  // `!open && !flowOpen` effect clears the target right before the dialog
+  // opens and the pick falls back to creating a new Workspace.
+  const flowOpenedRef = useRef(false)
 
   // The occupied hole gates the picking affordance: with no composed flow the
   // entry simply is not there (the seam's documented no-flow default). The
@@ -125,20 +146,43 @@ export function WorkspacePickFlow({
   const closeModal = (): void => {
     setErrorOpen(false)
     setModalError(null)
+    // Giving up after a failed adopt releases the target; "Choose again"
+    // goes through openDirectoryFlow, which keeps it.
+    onClearProjectTarget?.()
   }
 
-  /** Adopt a picked directory; failures land in the folder-error dialog (Choose again reopens the flow). */
-  const adoptDirectory = (path: string): Promise<void> =>
-    createWorkspace({ path }).then((workspace) => {
+  /**
+   * Adopt a picked directory; failures land in the folder-error dialog
+   * (Choose again reopens the flow). With a project target the directory
+   * joins that Workspace as a member instead of creating a new one.
+   */
+  const adoptDirectory = (path: string): Promise<void> => {
+    const adopting = addProject !== undefined && projectTarget !== null
+      ? { add: addProject, target: projectTarget }
+      : null
+    const action = adopting === null
+      ? createWorkspace({ path }).then(workspace => workspace.workspaceId)
+      : adopting.add(adopting.target, path).then(() => adopting.target)
+    return action.then((workspaceId) => {
       setFlowOpen(false)
-      onPick(workspace.workspaceId)
+      flowOpenedRef.current = false
+      onClearProjectTarget?.()
+      onPick(workspaceId)
     }).catch((reason: unknown) => {
-      setModalError(reason instanceof Error ? reason.message : String(reason))
+      const code = typeof reason === 'object' && reason !== null && 'code' in reason
+        ? reason.code
+        : undefined
+      setModalError(code === 'workspace/path-exists'
+        ? t('folderError.exists')
+        : reason instanceof Error ? reason.message : String(reason))
       setFlowOpen(false)
+      flowOpenedRef.current = false
       setErrorOpen(true)
     })
+  }
 
   const openDirectoryFlow = useCallback((): void => {
+    flowOpenedRef.current = true
     onClose()
     setErrorOpen(false)
     setModalError(null)
@@ -169,9 +213,14 @@ export function WorkspacePickFlow({
       setPickingFolder(true)
       void adoptDirectory(path).finally(() => { setPickingFolder(false) })
     },
-    onCancel: () => { setFlowOpen(false) },
+    onCancel: () => {
+      setFlowOpen(false)
+      flowOpenedRef.current = false
+      onClearProjectTarget?.()
+    },
     onError: (message) => {
       setFlowOpen(false)
+      flowOpenedRef.current = false
       setModalError(message)
       setErrorOpen(true)
     },
@@ -194,7 +243,12 @@ export function WorkspacePickFlow({
         {...pinAdd ? { footer: addEntries } : {}}
         selectedId={selectedId}
         onSelect={handleSelect}
-        onClose={onClose}
+        onClose={() => {
+          onClose()
+          // Dismissed without the flow ever opening releases the target; the
+          // internal menu→dialog transition has the ref set and keeps it.
+          if (!flowOpenedRef.current) onClearProjectTarget?.()
+        }}
         side={side}
         portal
         getAnchorRect={getAnchorRect}

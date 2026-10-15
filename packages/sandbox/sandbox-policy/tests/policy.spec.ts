@@ -169,12 +169,37 @@ describe('sandbox:policy request context', () => {
     return ctx
   }
 
+  it('widens the writable roots to every member of the session workspace', async () => {
+    const ctx = await promptMounted({ mode: 'workspace-write', workspaceRoot: '/fallback' })
+    const accounted = session('sess-membered', '/projects/main')
+    ctx.provide('workspaceRegistry', {
+      pathsForSession: (id: SessionId) =>
+        id === accounted.id ? ['/projects/main', '/projects/lib'] : undefined,
+    } as never)
+    expect(ctx.sandboxPolicy.resolve({ session: accounted })).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: '/projects/main',
+      workspaceRoots: ['/projects/main', '/projects/lib'],
+      sessionId: 'sess-membered',
+    })
+    // The model-facing policy text names every writable member root.
+    await expect(policyContext(ctx, accounted)).resolves.toContain(
+      `session workspace roots: ${JSON.stringify(['/projects/main', '/projects/lib'])}`,
+    )
+    // Unaccounted sessions keep the single-root policy and rendering.
+    expect(ctx.sandboxPolicy.resolve({ session: session('sess-loose', '/projects/loose') })).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: '/projects/loose',
+      sessionId: 'sess-loose',
+    })
+  })
+
   it.each(['read-only', 'workspace-write', 'danger-full-access'] as const)('renders the exact %s policy without a capability inventory', async (mode) => {
     const ctx = await promptMounted({ mode, workspaceRoot: '/fallback' })
     const workspaceRoot = '/projects/../projects/current'
     const expected = {
       'read-only': 'Current DSH file policy: read-only. Any available operation enforced by the DSH file sandbox cannot modify files in the standing mode. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.',
-      'workspace-write': `Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: ${JSON.stringify(workspaceRoot)}. Some platform temporary areas may also be writable.`,
+      'workspace-write': `Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace roots: ${JSON.stringify([workspaceRoot])}. Some platform temporary areas may also be writable.`,
       'danger-full-access': 'Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.',
     } as const
 
@@ -213,7 +238,7 @@ describe('sandbox:policy request context', () => {
     expect(await policyContext(ctx, active)).toBe(danger)
 
     setSandboxMode(active, 'workspace-write')
-    expect(await policyContext(ctx, active)).toBe(`Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: ${JSON.stringify('/projects/current')}. Some platform temporary areas may also be writable.`)
+    expect(await policyContext(ctx, active)).toBe(`Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace roots: ${JSON.stringify(['/projects/current'])}. Some platform temporary areas may also be writable.`)
   })
 
   it('reconstructs resumed policy from the session log and omits diagnostics without an agent', async () => {

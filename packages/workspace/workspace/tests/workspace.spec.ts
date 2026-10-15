@@ -16,11 +16,12 @@ import { MemoryMediaPool, MemoryStorageBackend } from '../../../storage/storage-
 import WorkspaceRegistry, {
   WorkspaceId,
   type workspaceDomainState,
+  workspaceRecord,
   WorkspaceMoveInvalidError,
   WorkspaceOrderInvalidError,
 } from '../src/index.ts'
 import type { WorkspaceDomainState, WorkspaceRecord } from '../src/index.ts'
-import { defaultWorkspaceTitle, fullyQualifiedWorkspacePath } from '../src/paths.ts'
+import { defaultWorkspaceTitle, fullyQualifiedWorkspacePath, realpathNormalizeDeepest } from '../src/paths.ts'
 import * as workspacePaths from '../src/paths.ts'
 
 const DOMAIN_VERSION = 2
@@ -140,6 +141,7 @@ function selectiveFailureBackend(
 function record(path: string, sessionIds: string[], createdAt = '2026-07-24T00:00:00.000Z'): WorkspaceRecord {
   return {
     path,
+    paths: [path],
     title: basename(path),
     sessionIds: sessionIds.map(SessionId),
     createdAt,
@@ -155,7 +157,7 @@ function record(path: string, sessionIds: string[], createdAt = '2026-07-24T00:0
 type StoredDomainState = z.input<typeof workspaceDomainState>
 
 function storedPool(
-  entries: Array<[string, WorkspaceRecord]>,
+  entries: Array<[string, z.input<typeof workspaceRecord>]>,
   state: StoredDomainState,
 ): MemoryMediaPool {
   const pool = new MemoryMediaPool()
@@ -379,7 +381,7 @@ describe('WorkspaceRegistry create and lookup', () => {
     expect(fullyQualifiedWorkspacePath('work', 'linux')).toBe(false)
   })
 
-  it('creates newest-first and idempotently reuses a canonical path without retitling', async () => {
+  it('creates newest-first and always registers a canonical path anew', async () => {
     const firstDir = await makeDir('first')
     const secondDir = await makeDir('second')
     const alias = join(base, 'first-link')
@@ -387,25 +389,35 @@ describe('WorkspaceRegistry create and lookup', () => {
     const { registry, pool } = await harness()
     const first = await registry.create(firstDir, 'Original')
     const second = await registry.create(secondDir)
-    const reused = await registry.create(alias, 'Ignored')
-    expect(reused).toBe(first)
+    // Adding a workspace is an explicit act: the same canonical path — even
+    // through a symlink spelling — registers AGAIN, with its own title.
+    const again = await registry.create(alias, 'Again')
+    expect(again).not.toBe(first)
+    expect(again.path).toBe(firstDir)
+    expect(again.title).toBe('Again')
     expect(first.title).toBe('Original')
-    expect(registry.list()).toEqual([second, first])
-    expect(storedState(pool).workspaceIds).toEqual([second.id, first.id])
-    expect(await registry.resolveByPath(alias)).toBe(first)
+    expect(registry.list()).toEqual([again, second, first])
+    expect(storedState(pool).workspaceIds).toEqual([again.id, second.id, first.id])
+    // With duplicate primaries the first in durable registry order answers
+    // (visible after a reload, which rebuilds the entity cache in that order).
+    const reloaded = await harness({ pool })
+    expect(await reloaded.registry.resolveByPath(alias)).toBe(reloaded.registry.get(again.id))
+    expect(await reloaded.registry.resolvePrimaryByPath(alias)).toBe(reloaded.registry.get(again.id))
     expect(await registry.resolveByPath(await makeDir('unowned'))).toBeUndefined()
   })
 
-  it('serializes concurrent same-path creates into one entity', async () => {
+  it('serializes concurrent same-path creates into two registrations', async () => {
     const dir = await makeDir('concurrent')
     const { registry, pool } = await harness()
     const [left, right] = await Promise.all([
-      registry.create(dir, 'Winner'),
-      registry.create(dir, 'Loser'),
+      registry.create(dir, 'First'),
+      registry.create(dir, 'Second'),
     ])
-    expect(left).toBe(right)
-    expect(registry.list()).toEqual([left])
-    expect(pool.media.get('workspace')!.tables.get('workspaces')!.size).toBe(1)
+    expect(left).not.toBe(right)
+    // Both prepends land in the serialized queue, but the canonicalization
+    // I/O before it races, so either title may head the order.
+    expect(registry.list().map(workspace => workspace.id).sort()).toEqual([left.id, right.id].sort())
+    expect(pool.media.get('workspace')!.tables.get('workspaces')!.size).toBe(2)
   })
 
   it('allows a duplicate display name on a different canonical path', async () => {
@@ -514,7 +526,8 @@ describe('WorkspaceRegistry create and lookup', () => {
   it('deletes only the registration and leaves its directory and session headers untouched', async () => {
     const dir = await makeDir('delete-registration')
     const result = await harness({ sessions: [header('kept-session', dir)] })
-    const workspace = await result.registry.create(dir)
+    const workspace = result.registry.list()[0]!
+    expect(workspace.path).toBe(dir)
     await workspace.attachSession(SessionId('kept-session'))
 
     await expect(result.registry.delete(workspace.id)).resolves.toBe(true)
@@ -754,12 +767,153 @@ describe('Workspace session ordering', () => {
   it('decides detach/attach membership at domain write-chain slots', async () => {
     const dir = await makeDir('race')
     const result = await harness({ sessions: [header('s1', dir)] })
-    const workspace = await result.registry.create(dir)
+    // Bootstrap already registered and accounted the session's workspace;
+    // creating again would register a second workspace for the same path.
+    const workspace = result.registry.list()[0]!
+    expect(workspace.path).toBe(dir)
     await workspace.attachSession(SessionId('s1'))
     const detached = workspace.detachSession(SessionId('s1'))
     const attached = workspace.attachSession(SessionId('s1'))
     await Promise.all([detached, attached])
     expect(workspace.sessionIds).toEqual(['s1'])
+  })
+
+})
+
+describe('multi-root member paths', () => {
+  it('canonicalizes a missing tail through the deepest existing ancestor', async () => {
+    const existing = await makeDir('deepest')
+    expect(await realpathNormalizeDeepest(existing)).toBe(existing)
+    expect(await realpathNormalizeDeepest(join(existing, 'gone', 'deeper'))).toBe(join(existing, 'gone', 'deeper'))
+    const linkTarget = await makeDir('link-target')
+    const link = join(base, 'link')
+    await symlink(linkTarget, link)
+    expect(await realpathNormalizeDeepest(join(link, 'missing'))).toBe(join(linkTarget, 'missing'))
+    await expect(realpathNormalizeDeepest('relative/x')).rejects.toThrow(/fully qualified/)
+    // Windows grammar on a POSIX host: no spelled ancestor exists there, so
+    // the walk climbs to the drive root and returns the raw spelling.
+    if (process.platform !== 'win32') {
+      expect(await realpathNormalizeDeepest('C:\\missing\\deep', 'win32')).toBe('C:\\missing\\deep')
+    }
+  })
+
+  it('adds and removes member directories with the primary first and unremovable', async () => {
+    const dir = await makeDir('multiroot')
+    const member = await makeDir('member')
+    const { registry } = await harness()
+    const workspace = await registry.create(dir)
+    expect(workspace.paths).toEqual([dir])
+    await workspace.addPath(member)
+    expect(workspace.paths).toEqual([dir, member])
+    // A repeated add is an idempotent no-op that preserves member order.
+    await workspace.addPath(member)
+    expect(workspace.paths).toEqual([dir, member])
+    await expect(workspace.removePath(dir)).rejects.toThrow(/primary path/)
+    await workspace.removePath(member)
+    expect(workspace.paths).toEqual([dir])
+    // Removing a non-member is an idempotent no-op.
+    await workspace.removePath(member)
+    expect(workspace.paths).toEqual([dir])
+  })
+
+  it('normalizes symlink spellings on add and rejects non-directories and unknown workspaces', async () => {
+    const dir = await makeDir('add-invalid')
+    const member = await makeDir('add-target')
+    const alias = join(base, 'add-alias')
+    await symlink(member, alias)
+    const file = join(base, 'add-file')
+    await writeFile(file, 'file')
+    const { registry } = await harness()
+    const workspace = await registry.create(dir)
+    await workspace.addPath(alias)
+    expect(workspace.paths).toEqual([dir, member])
+    await expect(workspace.addPath(file)).rejects.toThrow(/not a directory/)
+    await expect(registry.addPath(WorkspaceId('00000000-0000-4000-8000-000000000099'), member)).rejects.toThrow(/unknown/)
+  })
+
+  it('accounts a session whose canonical cwd is any member directory and prunes it with the member', async () => {
+    const dir = await makeDir('account-primary')
+    const member = await makeDir('account-member')
+    const result = await harness({ sessions: [], liveSessions: [header('member-session', member, 1)] })
+    const workspace = await result.registry.create(dir)
+    await workspace.addPath(member)
+    await workspace.attachSession(SessionId('member-session'))
+    expect(workspace.sessionIds).toEqual(['member-session'])
+    await workspace.removePath(member)
+    expect(workspace.sessionIds).toEqual([])
+    expect(storedRecord(result.pool, workspace.id).sessionIds).toEqual([])
+  })
+
+  it('prefers the primary owner on path lookup and still resolves member-only paths', async () => {
+    const dir = await makeDir('owner')
+    const sharerDir = await makeDir('sharer')
+    const memberOnly = await makeDir('member-only')
+    const { registry } = await harness()
+    const owner = await registry.create(dir)
+    const sharer = await registry.create(sharerDir)
+    await sharer.addPath(dir)
+    await sharer.addPath(memberOnly)
+    expect(await registry.resolveByPath(dir)).toBe(owner)
+    expect(await registry.resolvePrimaryByPath(dir)).toBe(owner)
+    expect(await registry.resolveByPath(memberOnly)).toBe(sharer)
+    expect(await registry.resolvePrimaryByPath(memberOnly)).toBeUndefined()
+  })
+
+  it('answers the owning workspace member set for a session', async () => {
+    const dir = await makeDir('paths-session')
+    const member = await makeDir('paths-member')
+    const result = await harness({ sessions: [], liveSessions: [header('owned-session', dir, 1)] })
+    const workspace = await result.registry.create(dir)
+    await workspace.addPath(member)
+    await workspace.attachSession(SessionId('owned-session'))
+    expect(result.registry.pathsForSession(SessionId('owned-session'))).toEqual([dir, member])
+    expect(result.registry.pathsForSession(SessionId('unaccounted'))).toBeUndefined()
+  })
+
+  it('removes a member whose directory was deleted underneath the workspace', async () => {
+    const dir = await makeDir('ghost-primary')
+    const member = await makeDir('ghost-member')
+    const { registry } = await harness()
+    const workspace = await registry.create(dir)
+    await workspace.addPath(member)
+    await rm(member, { recursive: true })
+    await workspace.removePath(member)
+    expect(workspace.paths).toEqual([dir])
+  })
+
+  it('reads records written before the paths field as single-member workspaces', async () => {
+    const owned = await makeDir('legacy-record')
+    const id = WorkspaceId('00000000-0000-4000-8000-000000000010')
+    // Records written before the multi-root widening carry no `paths` field.
+    const legacy: z.input<typeof workspaceRecord> = {
+      path: owned,
+      title: basename(owned),
+      sessionIds: [],
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    }
+    const pool = storedPool([[id, legacy]], { initialized: true, workspaceIds: [id] })
+    const { registry } = await harness({ pool })
+    const workspace = registry.get(id)!
+    expect(workspace.paths).toEqual([owned])
+    // Mutations on the legacy shape read it as the single primary member.
+    await workspace.setTitle('legacy')
+    expect(workspace.title).toBe('legacy')
+    await workspace.removePath(join(base, 'never-a-member'))
+    await workspace.addPath(await makeDir('legacy-member'))
+    expect(workspace.paths).toHaveLength(2)
+  })
+
+  it('adds and removes members through the registry-level entry points', async () => {
+    const dir = await makeDir('registry-members')
+    const member = await makeDir('registry-member')
+    const { registry } = await harness()
+    const workspace = await registry.create(dir)
+    await registry.addPath(workspace.id, member)
+    expect(workspace.paths).toEqual([dir, member])
+    await registry.removePath(workspace.id, member)
+    expect(workspace.paths).toEqual([dir])
+    await expect(registry.removePath(WorkspaceId('00000000-0000-4000-8000-000000000099'), member)).rejects.toThrow(/unknown/)
   })
 
 })
@@ -936,7 +1090,7 @@ describe('header-validated membership projection', () => {
     expect(workspace.sessionIds).not.toContain('cwd-only')
   })
 
-  it('rejects duplicate candidate ownership, duplicate paths, and initialized order drift', async () => {
+  it('rejects duplicate candidate ownership and initialized order drift', async () => {
     const first = await makeDir('corrupt-first')
     const second = await makeDir('corrupt-second')
     const firstId = '00000000-0000-4000-8000-000000000002'
@@ -947,11 +1101,14 @@ describe('header-validated membership projection', () => {
     )
     await expect(harness({ pool: duplicateSession })).rejects.toThrow(/accounted/)
 
-    const duplicatePath = storedPool(
+    // Duplicate PRIMARY paths are legal: adding a workspace always registers
+    // anew, so one directory may head several workspaces.
+    const sharedPrimary = storedPool(
       [[firstId, record(first, [])], [secondId, record(first, [])]],
       { initialized: true, workspaceIds: [WorkspaceId(firstId), WorkspaceId(secondId)] },
     )
-    await expect(harness({ pool: duplicatePath })).rejects.toThrow(/claimed/)
+    const shared = await harness({ pool: sharedPrimary })
+    expect(shared.registry.list().map(workspace => workspace.path)).toEqual([first, first])
 
     const orphan = storedPool(
       [[firstId, record(first, [])], [secondId, record(second, [])]],

@@ -125,6 +125,30 @@ export class ClientWorkspaceModel implements WorkspaceFollowSink {
   }
 
   /**
+   * Add one member directory to a Workspace and merge the unary result immediately.
+   * @param workspaceId - target Workspace.
+   * @param path - existing absolute directory to add.
+   * @returns generated Remote result.
+   */
+  async addProject(workspaceId: WorkspaceId, path: string): Promise<RemoteResult<WorkspaceValue>> {
+    const result = await this.remote.addProject({ workspaceId, path })
+    if (result.ok) this.upsert(result.value.workspace)
+    return result
+  }
+
+  /**
+   * Remove one member directory from a Workspace and merge the unary result immediately.
+   * @param workspaceId - target Workspace.
+   * @param path - member directory to remove.
+   * @returns generated Remote result.
+   */
+  async removeProject(workspaceId: WorkspaceId, path: string): Promise<RemoteResult<WorkspaceValue>> {
+    const result = await this.remote.removeProject({ workspaceId, path })
+    if (result.ok) this.upsert(result.value.workspace)
+    return result
+  }
+
+  /**
    * Delete a Workspace and remove it from the local projection immediately.
    * @param workspaceId - target Workspace.
    * @returns generated Remote result.

@@ -369,6 +369,10 @@ describe('WorkspaceController', () => {
     await expect(controller.insertSessionBefore(wid('one'), sid('session'))).resolves.toMatchObject({
       sessionIds: ['session'],
     })
+    await expect(controller.addProject(wid('one'), '/work/member')).resolves.toMatchObject({
+      paths: ['/work/one', '/work/member'],
+    })
+    await expect(controller.removeProject(wid('one'), '/work/member')).resolves.toMatchObject({ workspaceId: 'one' })
     await expect(controller.archiveSession(sid('session'))).resolves.toBeUndefined()
     await expect(controller.unarchiveSession(sid('session'))).resolves.toBeUndefined()
     await expect(controller.pinSession(sid('session'))).resolves.toBeUndefined()
@@ -379,6 +383,8 @@ describe('WorkspaceController', () => {
     expect(mock.log.requests('workspace/rename')).toEqual([{ workspaceId: 'one', title: 'renamed' }])
     expect(mock.log.requests('workspace/insertBefore')).toEqual([{ workspaceId: 'one' }])
     expect(mock.log.requests('workspace/insertSessionBefore')).toEqual([{ workspaceId: 'one', sessionId: 'session' }])
+    expect(mock.log.requests('workspace/addProject')).toEqual([{ workspaceId: 'one', path: '/work/member' }])
+    expect(mock.log.requests('workspace/removeProject')).toEqual([{ workspaceId: 'one', path: '/work/member' }])
     await expect(controller.archiveSession(sid('session'), { stopActivity: true })).resolves.toBeUndefined()
     expect(mock.log.requests('workspace/archiveSession')).toEqual([{ sessionId: 'session' }, { sessionId: 'session', stopActivity: true }])
     expect(mock.log.requests('workspace/unarchiveSession')).toEqual([{ sessionId: 'session' }])
@@ -405,6 +411,16 @@ describe('WorkspaceController', () => {
     await expect(controller.rename(wid('missing'), 'name')).rejects.toThrow('workspace rename failed: workspace/not-found: gone')
     mock.remote.workspace.delete.mockResolvedValueOnce(err(missingWorkspace))
     await expect(controller.delete(wid('missing'))).rejects.toThrow('workspace delete failed: workspace/not-found: gone')
+    // Member commands keep the Host failure code on the thrown error, so the
+    // pick flow can localize `workspace/path-exists`.
+    const exists = new RemoteError('workspace/path-exists', 'already a member', { workspaceId: wid('one'), path: '/work/one' })
+    mock.remote.workspace.addProject.mockResolvedValueOnce(err(exists))
+    const addDuplicate = controller.addProject(wid('one'), '/work/one')
+    await expect(addDuplicate).rejects.toThrow('workspace add project path failed: workspace/path-exists: already a member')
+    await expect(addDuplicate).rejects.toMatchObject({ code: 'workspace/path-exists' })
+    mock.remote.workspace.removeProject.mockResolvedValueOnce(err(missingWorkspace))
+    await expect(controller.removeProject(wid('missing'), '/work/one'))
+      .rejects.toThrow('workspace remove project path failed: workspace/not-found: gone')
     mock.remote.workspace.insertBefore.mockResolvedValueOnce(err(missingWorkspace))
     await expect(controller.insertBefore(wid('missing'))).rejects.toThrow('workspace reorder failed: workspace/not-found: gone')
     mock.remote.workspace.archiveSession.mockResolvedValueOnce(err(missingSession))

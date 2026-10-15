@@ -15,10 +15,11 @@ import type { RefObject } from 'react'
 import clsx from 'clsx'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  HoverCard, IconArchiveOutlineRegular, IconEditOutlineRegular,
-  IconEllipsisOutlineRegular, IconFolderCloseRegular, IconFolderOpenRegular,
-  IconNewChatOutlineRegular, IconPinFillRegular, IconTrashOutlineRegular,
-  IconTriangleRightFillRegular, IconUnarchiveOutlineRegular, Menu, relativeTime, StateDot, Tooltip,
+  HoverCard, IconArchiveOutlineRegular, IconCloseFillRegular, IconCopyOutlineRegular, IconEditOutlineRegular,
+  IconEllipsisOutlineRegular, IconFolderCloseRegular, IconFolderOpenOutlineRegular, IconFolderOpenRegular,
+  IconNewChatOutlineRegular, IconPinFillRegular, IconProjectAddOutlineRegular, IconTrashOutlineRegular,
+  IconTriangleRightFillRegular, IconUnarchiveOutlineRegular, IconWorkspaceTreeOutlineRegular,
+  Menu, relativeTime, StateDot, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ShortcutCatalogEntry } from '@deepseek-ai/dsh-client-shortcuts/client'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -202,6 +203,122 @@ function rowHalf(e: { clientY: number; currentTarget: HTMLElement }): 'before' |
   return e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
 }
 
+/** Last path segment, for a member row's label and the removal dialog's folder name. */
+export function memberBaseName(path: string): string {
+  const parts = path.replace(/[/\\]+$/, '').split(/[/\\]/)
+  return parts[parts.length - 1] || path
+}
+
+/**
+ * Member-row verb set supplied by the browser root: the Explorer jump, path
+ * copy, the platform file-manager reveal (absent when the Host cannot open
+ * paths), and member removal (absent while the feature is unwired).
+ */
+export interface MemberMenu {
+  showInExplorer: (path: string) => void
+  copyPath: (path: string) => void
+  reveal?: ((path: string) => void) | undefined
+  remove?: ((path: string) => void) | undefined
+}
+
+/**
+ * One member directory row of a multi-root Workspace: folder glyph and base
+ * name, a "primary" badge in place of the remove button on the Workspace's
+ * own path, a "missing" badge on a directory that no longer exists, and a
+ * context menu with the member verbs. Member rows are presentation only;
+ * membership writes go through the injected callbacks.
+ * @param props.path - the member directory, primary first.
+ * @param props.primary - the Workspace's own path; it cannot be removed.
+ * @param props.memberMenu - member verb callbacks; absent renders a plain row.
+ * @param props.missingPaths - members missing on disk at the last Host projection.
+ * @param props.rowKey - the tree's flat row identity.
+ * @param props.t - the browser root's locale seat.
+ * @returns the member row.
+ */
+function MemberRowItem({ path, primary, memberMenu, missingPaths, rowKey, t }: {
+  path: string
+  primary: boolean
+  memberMenu?: MemberMenu | undefined
+  missingPaths?: readonly string[] | undefined
+  rowKey: string
+  t: RowTranslate
+}) {
+  const onRemove = memberMenu?.remove
+  const missing = missingPaths !== undefined && missingPaths.includes(path)
+  const [menuAt, setMenuAt] = useState<DOMRect | null>(null)
+  const menuItems = memberMenu === undefined
+    ? []
+    : [
+      { id: 'showInExplorer', label: t('member.menu.showInExplorer'), icon: <IconWorkspaceTreeOutlineRegular /> },
+      { id: 'copyPath', label: t('member.menu.copyPath'), icon: <IconCopyOutlineRegular /> },
+      ...memberMenu.reveal === undefined
+        ? []
+        : [{ id: 'reveal', label: t('member.menu.reveal'), icon: <IconFolderOpenOutlineRegular /> }],
+      ...primary || memberMenu.remove === undefined
+        ? []
+        : [{ id: 'remove', label: t('member.remove'), icon: <IconTrashOutlineRegular />, danger: true }],
+    ]
+  return (
+    <div
+      className={clsx(css.memberRow, missing && css.memberMissing)}
+      data-row-key={rowKey}
+      role="treeitem"
+      title={path}
+      onContextMenu={memberMenu === undefined
+        ? undefined
+        : (e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          setMenuAt(new DOMRect(e.clientX, e.clientY, 0, 0))
+        }}
+    >
+      <span className={clsx(css.slot, css.folder)}>
+        <IconFolderCloseRegular />
+      </span>
+      <span className={css.projectText}>
+        <span className={css.title}>{memberBaseName(path)}</span>
+      </span>
+      {primary && <span className={css.memberBadge}>{t('member.primary')}</span>}
+      {missing && <span className={css.memberBadge}>{t('member.missing')}</span>}
+      {!primary && onRemove !== undefined && (
+        <span className={css.rowActions}>
+          <Tooltip label={t('member.remove')} side="bottom" align="end" delayMs={500}>
+            <button
+              type="button"
+              className={css.iconButton}
+              aria-label={t('member.remove')}
+              onClick={(e) => { e.stopPropagation(); onRemove(path) }}
+            >
+              <IconCloseFillRegular />
+            </button>
+          </Tooltip>
+        </span>
+      )}
+      {memberMenu !== undefined && (
+        <Menu
+          open={menuAt !== null}
+          compact
+          portal
+          anchor={<span style={{ display: 'none' }} />}
+          getAnchorRect={() => menuAt}
+          items={menuItems}
+          onSelect={(id) => {
+            setMenuAt(null)
+            /* v8 ignore next -- Menu can emit only the member rows supplied above. */
+            if (id !== 'showInExplorer' && id !== 'copyPath' && id !== 'reveal' && id !== 'remove') return
+            if (id === 'showInExplorer') memberMenu.showInExplorer(path)
+            else if (id === 'copyPath') memberMenu.copyPath(path)
+            /* v8 ignore next -- the reveal item renders only when the verb is set */
+            else if (id === 'reveal') memberMenu.reveal?.(path)
+            else memberMenu.remove?.(path)
+          }}
+          onClose={() => { setMenuAt(null) }}
+        />
+      )}
+    </div>
+  )
+}
+
 /**
  * Project (workspace) header row: folder + title;
  * hover reveals the chevron and create button, and dwelling on a real
@@ -216,18 +333,22 @@ function rowHalf(e: { clientY: number; currentTarget: HTMLElement }): 'before' |
  * @param props.t - the browser root's locale seat.
  * @returns the row element.
  */
-export function ProjectRowItem({ group, containsCurrentDescendant = false, onToggle, onCreate, actions, drag, home, newShortcut, t }: {
+export function ProjectRowItem({
+  group, containsCurrentDescendant = false, onToggle, onCreate, actions, drag, home, newShortcut, memberMenu, t,
+}: {
   group: GroupNode
   newShortcut?: ShortcutCatalogEntry | undefined
   containsCurrentDescendant?: boolean
   onToggle: () => void
   onCreate: () => void
   /** Real-Workspace actions; absent for the ungrouped bucket (no menu shown). */
-  actions?: { rename: () => void; delete: () => void } | undefined
+  actions?: { addProject?: () => void; rename: () => void; delete: () => void } | undefined
   /** Present only for real Workspace rows in the grouped view. */
   drag?: WorkspaceRowDragProps | undefined
   /** Host account home; POSIX home-rooted hover paths display as `~`. */
   home?: string | undefined
+  /** Member-row verb set; absent renders no member context menus or remove buttons. */
+  memberMenu?: MemberMenu | undefined
   t: RowTranslate
 }) {
   const row = group
@@ -236,6 +357,9 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
   const active = containsCurrentDescendant || (group.expanded && group.containsCurrent)
   const [menuOpen, setMenuOpen] = useState(false)
   const workspaceMenuItems = [
+    ...actions?.addProject === undefined
+      ? []
+      : [{ id: 'addProject', label: t('menu.addProject'), icon: <IconProjectAddOutlineRegular /> }],
     { id: 'rename', label: t('rename'), icon: <IconEditOutlineRegular /> },
     { id: 'delete', label: t('delete.workspace'), icon: <IconTrashOutlineRegular />, danger: true },
   ]
@@ -275,9 +399,10 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
               setMenuOpen(false)
               // Unknown ids leave before the dispatch: a future menu row must
               // not inherit the destructive branch as an else fallback.
-              /* v8 ignore next -- Menu can emit only the rename and delete rows supplied above. */
-              if (id !== 'rename' && id !== 'delete') return
-              if (id === 'rename') actions.rename()
+              /* v8 ignore next -- Menu can emit only the addProject, rename and delete rows supplied above. */
+              if (id !== 'addProject' && id !== 'rename' && id !== 'delete') return
+              if (id === 'addProject') actions.addProject?.()
+              else if (id === 'rename') actions.rename()
               else actions.delete()
             }}
             portal
@@ -310,22 +435,42 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
   )
   // The ungrouped bucket has no backing Workspace: no card to show.
   if (row.createdAt === undefined) return ownRow
-  return (
-    <HoverCard
-      anchor={ownRow}
-      content={<WorkspaceHoverContent
-        label={row.label}
-        cwd={row.cwd === undefined ? undefined : abbreviateHomePath(row.cwd, home)}
-        createdAt={row.createdAt}
+  // Member rows render from this component's own Fragment slot: a bare
+  // conditional sibling in the caller's children array reconciles into the
+  // HoverCard anchor wrapper and the rows land before their workspace row
+  // instead of under it.
+  const memberRows = row.expanded && row.paths !== undefined && row.paths.length > 1
+    ? row.paths.map((path, index) => (
+      <MemberRowItem
+        key={`member:${group.key}:${path}`}
+        path={path}
+        primary={index === 0}
+        memberMenu={memberMenu}
+        missingPaths={row.missingPaths}
+        rowKey={`member:${group.key}:${path}`}
         t={t}
-      />}
-      openDelayMs={800}
-      grouped
-      disabled={menuOpen}
-      copyText={row.cwd}
-      copyLabel={t('copy')}
-      copiedLabel={t('hover.copied')}
-    />
+      />
+    ))
+    : []
+  return (
+    <>
+      <HoverCard
+        anchor={ownRow}
+        content={<WorkspaceHoverContent
+          label={row.label}
+          cwd={row.cwd === undefined ? undefined : abbreviateHomePath(row.cwd, home)}
+          createdAt={row.createdAt}
+          t={t}
+        />}
+        openDelayMs={800}
+        grouped
+        disabled={menuOpen}
+        copyText={row.cwd}
+        copyLabel={t('copy')}
+        copiedLabel={t('hover.copied')}
+      />
+      {memberRows}
+    </>
   )
 }
 
