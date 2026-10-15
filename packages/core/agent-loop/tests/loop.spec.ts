@@ -545,9 +545,9 @@ describe('agent loop', () => {
     expect(request!.tools?.map(t => t.name)).toEqual(['noop'])
   })
 
-  it('keeps the Session directory out of system-prompt variables', async () => {
+  it('exposes the Session directory as the cwd system-prompt variable', async () => {
     const adapter = new MockAdapter([textResponse('ok')])
-    const ctx = await harness(adapter, 'A coding agent.')
+    const ctx = await harness(adapter, 'Work in {{cwd}}.')
     const handle = await ctx.agents.create({
       sessionId: SessionId('s-cwd'),
       meta: { cwd: '/work/space' },
@@ -558,8 +558,8 @@ describe('agent loop', () => {
     send(agent, 'hi')
     await waitForIdle(ctx, agent)
 
-    expect(systemOf(adapter.requests[0])).toBe('You are an AI agent powered by DeepSeek Harness.\n\nA coding agent.')
-    expect((await ctx.systemPrompt.assemble({ agent, scope: agent })).variables).not.toHaveProperty('cwd')
+    expect(systemOf(adapter.requests[0])).toBe('You are an AI agent powered by DeepSeek Harness.\n\nWork in /work/space.')
+    expect((await ctx.systemPrompt.assemble({ agent, scope: agent })).variables).toHaveProperty('cwd', '/work/space')
   })
 
   it('contains a strict-variable render failure: the turn errors, the loop keeps serving turns', async () => {
