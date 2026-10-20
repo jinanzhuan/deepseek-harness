@@ -295,10 +295,11 @@ export function WorkspacePickFlow({
     },
     onCancel: () => {
       if (importFlowOpen) {
-        // The document chooser answered nothing: offer the typed-path modal.
+        // Cancelling the document chooser is a plain dismiss; the typed-path
+        // modal is only the fallback for a MISSING chooser (onError), never a
+        // second dialog after an operator decision.
         setImportFlowOpen(false)
         flowOpenedRef.current = false
-        setImportOpen(true)
         return
       }
       setFlowOpen(false)
