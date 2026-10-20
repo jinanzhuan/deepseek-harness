@@ -1,6 +1,9 @@
 /** Workspace command implementation and stable Remote failure mapping. */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { basename, dirname, isAbsolute, join, normalize } from 'node:path'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import {
   realpathNormalize,
@@ -21,6 +24,8 @@ import type {
   WorkspaceCreateValue,
   WorkspaceDeleteRequest,
   WorkspaceDeleteValue,
+  WorkspaceImportCodeWorkspaceRequest,
+  WorkspaceImportCodeWorkspaceValue,
   WorkspaceInsertBeforeRequest,
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
@@ -290,6 +295,83 @@ export class WorkspaceCommands {
     })
   }
 
+  /**
+   * Import one `.code-workspace` document as a Workspace: the document's first
+   * existing folder becomes the primary path, every other existing folder a
+   * member, and the file basename (minus the suffix) the title. When a
+   * Workspace already owns that first folder the document folds into it
+   * instead (import is a merge, never a duplicate registration). The document
+   * is appended to the shared ledger so the code-workspace auto-sync plugin
+   * keeps watching it across restarts.
+   * @param request - document path, or a directory holding exactly one.
+   * @returns the Workspace projection, whether this call created it, and the canonical document path.
+   */
+  importCodeWorkspace(request: WorkspaceImportCodeWorkspaceRequest): Promise<WorkspaceImportCodeWorkspaceValue> {
+    return this.enqueue(async () => {
+      try {
+        const input = request.path.trim()
+        if (input === '') {
+          throw new RemoteError('workspace/import-invalid', 'import requires a .code-workspace document path', { path: request.path })
+        }
+        const expanded = input === '~' ? homedir() : input.startsWith('~/') ? join(homedir(), input.slice(2)) : input
+        let info
+        try {
+          info = await stat(expanded)
+        } catch {
+          throw new RemoteError('workspace/import-not-found', `no such file or directory: "${expanded}"`, { path: expanded })
+        }
+        let document: string
+        if (info.isDirectory()) {
+          const names = (await readdir(expanded, { withFileTypes: true }))
+            .filter(entry => entry.isFile() && entry.name.endsWith('.code-workspace'))
+            .map(entry => entry.name)
+          if (names.length === 0) {
+            throw new RemoteError('workspace/import-no-document', `no .code-workspace document in "${expanded}"`, { path: expanded })
+          }
+          if (names.length > 1) {
+            throw new RemoteError(
+              'workspace/import-ambiguous',
+              `"${expanded}" holds ${names.length} .code-workspace documents; name one explicitly: ${names.join(', ')}`,
+              { path: expanded, names },
+            )
+          }
+          const [only] = names
+          if (only === undefined) throw new RemoteError('workspace/import-no-document', `no .code-workspace document in "${expanded}"`, { path: expanded })
+          document = join(expanded, only)
+        } else {
+          if (!expanded.endsWith('.code-workspace')) {
+            throw new RemoteError('workspace/import-invalid', `"${expanded}" is not a .code-workspace document`, { path: expanded })
+          }
+          document = expanded
+        }
+        const canonicalDocument = await realpath(document)
+        const folders = await codeWorkspaceFolders(canonicalDocument)
+        // codeWorkspaceFolders rejects an empty document, so the primary is
+        // always present here; the explicit check keeps the invariant local.
+        const primary = folders.at(0)
+        if (primary === undefined) throw new RemoteError('workspace/import-empty', `"${canonicalDocument}" lists no existing folder`, { path: canonicalDocument })
+        const registry = this.ctx.workspaceRegistry
+        let workspace = registry.list().find(candidate => candidate.path === primary)
+        let created = false
+        if (workspace === undefined) {
+          workspace = await registry.create(primary, basename(canonicalDocument, '.code-workspace'))
+          created = true
+        }
+        for (const path of folders.slice(1)) await registry.addPath(workspace.id, path)
+        await rememberCodeWorkspaceDocument(canonicalDocument)
+        return { workspace: workspaceView(this.requireWorkspace(workspace.id)), created, document: canonicalDocument }
+      } catch (error) {
+        if (remoteErrorOf(error) !== undefined) throw error
+        throw new RemoteError(
+          'workspace/import-failed',
+          `cannot import .code-workspace document "${request.path}": ${errorMessage(error)}`,
+          { path: request.path },
+          { cause: error },
+        )
+      }
+    })
+  }
+
   private requireWorkspace(workspaceId: WorkspaceId): Workspace {
     const workspace = this.ctx.workspaceRegistry.get(WorkspaceId(workspaceId))
     if (workspace === undefined) throw workspaceNotFound(workspaceId)
@@ -313,4 +395,88 @@ function workspaceNotFound(workspaceId: WorkspaceId): RemoteError<'workspace/not
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Ledger file shared with the code-workspace auto-sync plugin: every GUI
+ * import is remembered here so the plugin keeps watching across restarts.
+ */
+function codeWorkspaceStateFile(): string {
+  return join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'storages', 'code-workspace-auto-sync.json')
+}
+
+/**
+ * Existing folder members of one `.code-workspace` document, canonicalized,
+ * deduped, in document order. Missing members are skipped; a document with no
+ * existing folder rejects.
+ * @param document - canonical document path.
+ */
+async function codeWorkspaceFolders(document: string): Promise<string[]> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(await readFile(document, 'utf8'))
+  } catch (error) {
+    throw new RemoteError(
+      'workspace/import-parse',
+      `cannot parse "${document}": ${errorMessage(error)}`,
+      { path: document },
+      { cause: error },
+    )
+  }
+  const list = parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { folders?: unknown }).folders)
+    ? (parsed as { folders: unknown[] }).folders
+    : []
+  const base = dirname(document)
+  const seen = new Set<string>()
+  const folders: string[] = []
+  for (const folder of list) {
+    if (folder === null || typeof folder !== 'object' || typeof (folder as { path?: unknown }).path !== 'string') continue
+    const rawPath = (folder as { path: string }).path
+    if (rawPath.trim() === '') continue
+    const raw = isAbsolute(rawPath) ? normalize(rawPath) : join(base, rawPath)
+    let canonical: string
+    try {
+      canonical = await realpath(raw)
+      if (!(await stat(canonical)).isDirectory()) continue
+    } catch {
+      continue
+    }
+    if (seen.has(canonical)) continue
+    seen.add(canonical)
+    folders.push(canonical)
+  }
+  if (folders.length === 0) {
+    throw new RemoteError('workspace/import-empty', `"${document}" lists no existing folder`, { path: document })
+  }
+  return folders
+}
+
+/**
+ * Remember one GUI-imported document in the shared ledger (best effort; the
+ * bump of `revision` clears the sync plugin's suppression list). A ledger
+ * write failure never fails the import itself.
+ * @param document - canonical document path.
+ */
+async function rememberCodeWorkspaceDocument(document: string): Promise<void> {
+  try {
+    const file = codeWorkspaceStateFile()
+    let revision = 0
+    let documents: string[] = []
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf8')) as { revision?: unknown; documents?: unknown } | null
+      if (parsed !== null && typeof parsed === 'object') {
+        if (Number.isInteger(parsed.revision)) revision = parsed.revision as number
+        if (Array.isArray(parsed.documents)) documents = (parsed.documents as unknown[]).filter((p): p is string => typeof p === 'string')
+      }
+    } catch {
+      // A missing or unreadable ledger starts fresh; the write below recreates it.
+    }
+    if (!documents.includes(document)) documents.push(document)
+    revision += 1
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify({ revision, documents }, null, 2))
+  } catch {
+    // Best effort: the import itself already succeeded; the sync plugin just
+    // misses this document until the next explicit import.
+  }
 }

@@ -22,6 +22,7 @@ import type { DirectoryFlowOwnerProps, WorkspacePickerProps } from './contract/s
 import css from './WorkspacePicker.module.css'
 
 const ADD_WORKSPACE = '::add-workspace'
+const IMPORT_CODE_WORKSPACE = '::import-code-workspace'
 
 /** Core flow props: the owner supplies popover control and pick semantics. */
 export interface WorkspacePickFlowProps {
@@ -60,6 +61,11 @@ export interface WorkspacePickFlowProps {
   addProject?: ((workspaceId: WorkspaceId, path: string) => Promise<void>) | undefined
   /** Release the add-project target at explicit flow endpoints (picked, cancelled, error dismissed). */
   onClearProjectTarget?: (() => void) | undefined
+  /**
+   * Import one `.code-workspace` document as a Workspace; the rejection may
+   * carry a Host failure code (`workspace/import-*`). Absent hides the import entry.
+   */
+  importCodeWorkspace?: ((path: string) => Promise<unknown>) | undefined
 }
 
 /**
@@ -84,6 +90,7 @@ export function WorkspacePickFlow({
   projectTarget = null,
   addProject,
   onClearProjectTarget,
+  importCodeWorkspace,
 }: WorkspacePickFlowProps) {
   const workspaceSnapshot = useWorkspaces(state => state)
   const workspaces = workspaceSnapshot.items
@@ -95,11 +102,21 @@ export function WorkspacePickFlow({
   const [modalError, setModalError] = useState<string | null>(null)
   const [flowOpen, setFlowOpen] = useState(false)
   const [pickingFolder, setPickingFolder] = useState(false)
+  // .code-workspace import: the document flow reuses the directory-flow hole
+  // with `document: true`; the typed-path modal is the fallback when the
+  // occupant has no document chooser.
+  const [importOpen, setImportOpen] = useState(false)
+  const [importPath, setImportPath] = useState('')
+  const [importPending, setImportPending] = useState(false)
+  const [importFlowOpen, setImportFlowOpen] = useState(false)
+  const [importPicking, setImportPicking] = useState(false)
+  /** True when the folder-error dialog answers for a failed import, so its retry reopens the import flow. */
+  const [importRetry, setImportRetry] = useState(false)
   // One picking interaction at a time: while the flow is open (native chooser
   // pending, browse dialog up) or its pick is being adopted, every other
   // menu action stays disabled — a late outcome must not race a concurrent
   // selection or adoption.
-  const flowBusy = flowOpen || pickingFolder
+  const flowBusy = flowOpen || pickingFolder || importFlowOpen || importPicking
   useEffect(() => { onBusyChange?.(flowBusy) }, [flowBusy, onBusyChange])
   // The add-project target is released only at explicit flow endpoints
   // (picked, cancelled, error dismissed) or when the pick menu is dismissed
@@ -125,8 +142,11 @@ export function WorkspacePickFlow({
     if (flowOpen && !flowAvailable) setFlowOpen(false)
   }, [flowOpen, flowAvailable])
   const addEntries: MenuEntry[] = flowAvailable
-    ? [{ id: ADD_WORKSPACE, label: t('menu.addWorkspace'), icon: <IconPlusOutlineRegular size={16} />, disabled: flowBusy }]
-    : []
+    ? [
+      { id: ADD_WORKSPACE, label: t('menu.addWorkspace'), icon: <IconPlusOutlineRegular size={16} />, disabled: flowBusy },
+      ...importCodeWorkspace === undefined ? [] : [{ id: IMPORT_CODE_WORKSPACE, label: t('menu.importCodeWorkspace'), icon: <IconPlusOutlineRegular size={16} />, disabled: flowBusy }],
+    ]
+    : importCodeWorkspace === undefined ? [] : [{ id: IMPORT_CODE_WORKSPACE, label: t('menu.importCodeWorkspace'), icon: <IconPlusOutlineRegular size={16} />, disabled: flowBusy }]
   // With workspaces listed, the add action pins below the scroll region
   // (divider + always visible); otherwise it IS the menu.
   const pinAdd = !addOnly && workspaces.length > 0
@@ -146,6 +166,7 @@ export function WorkspacePickFlow({
   const closeModal = (): void => {
     setErrorOpen(false)
     setModalError(null)
+    setImportRetry(false)
     // Giving up after a failed adopt releases the target; "Choose again"
     // goes through openDirectoryFlow, which keeps it.
     onClearProjectTarget?.()
@@ -189,6 +210,59 @@ export function WorkspacePickFlow({
     setFlowOpen(true)
   }, [onClose])
 
+  /**
+   * Adopt an imported `.code-workspace` document: the Host registers or merges
+   * the Workspace and the result enters through onPick like a picked folder.
+   */
+  const adoptImport = (path: string): Promise<void> => {
+    if (importCodeWorkspace === undefined) return Promise.resolve()
+    return importCodeWorkspace(path).then((result) => {
+      setImportFlowOpen(false)
+      setImportOpen(false)
+      setImportPath('')
+      flowOpenedRef.current = false
+      const workspace = (result as { workspace?: WorkspaceView }).workspace
+      if (workspace !== undefined) onPick(workspace.workspaceId)
+    }).catch((reason: unknown) => {
+      setImportFlowOpen(false)
+      setImportOpen(false)
+      flowOpenedRef.current = false
+      setModalError(importErrorText(reason))
+      setImportRetry(true)
+      setErrorOpen(true)
+    })
+  }
+
+  const openImportFlow = (): void => {
+    flowOpenedRef.current = true
+    onClose()
+    if (flowAvailable) setImportFlowOpen(true)
+    else setImportOpen(true)
+  }
+
+  const closeImport = (): void => {
+    setImportOpen(false)
+    setImportPath('')
+  }
+
+  /** Map an import failure to a localized line; unknown failures show the Host message. */
+  const importErrorText = (reason: unknown): string => {
+    const code = typeof reason === 'object' && reason !== null && 'code' in reason
+      ? (reason as { code?: unknown }).code
+      : undefined
+    if (code === 'workspace/import-not-found') return t('import.error.notFound')
+    if (code === 'workspace/import-no-document') return t('import.error.noDocument')
+    if (code === 'workspace/import-invalid') return t('import.error.invalid')
+    if (code === 'workspace/import-empty') return t('import.error.empty')
+    return reason instanceof Error ? reason.message : String(reason)
+  }
+
+  const submitImport = (): void => {
+    if (importPending) return
+    setImportPending(true)
+    void adoptImport(importPath).catch(() => undefined).finally(() => { setImportPending(false) })
+  }
+
   // A menu exists to disambiguate between targets. With no workspaces listed
   // and the add action the only entry left, the anchor gesture IS that action:
   // a one-row popover would cost a click and offer nothing to choose between.
@@ -207,18 +281,38 @@ export function WorkspacePickFlow({
 
   /** Owner side of the flow conversation: adopt keeps the flow open (busy) until the Host answers. */
   const flowOwner: DirectoryFlowOwnerProps = {
-    open: flowOpen,
-    busy: pickingFolder,
+    open: flowOpen || importFlowOpen,
+    document: importFlowOpen,
+    busy: pickingFolder || importPicking,
     onPicked: (path) => {
+      if (importFlowOpen) {
+        setImportPicking(true)
+        void adoptImport(path).finally(() => { setImportPicking(false) })
+        return
+      }
       setPickingFolder(true)
       void adoptDirectory(path).finally(() => { setPickingFolder(false) })
     },
     onCancel: () => {
+      if (importFlowOpen) {
+        // The document chooser answered nothing: offer the typed-path modal.
+        setImportFlowOpen(false)
+        flowOpenedRef.current = false
+        setImportOpen(true)
+        return
+      }
       setFlowOpen(false)
       flowOpenedRef.current = false
       onClearProjectTarget?.()
     },
     onError: (message) => {
+      if (importFlowOpen) {
+        // No document chooser (or a chooser failure): fall back to the typed path.
+        setImportFlowOpen(false)
+        flowOpenedRef.current = false
+        setImportOpen(true)
+        return
+      }
       setFlowOpen(false)
       flowOpenedRef.current = false
       setModalError(message)
@@ -229,6 +323,10 @@ export function WorkspacePickFlow({
   const handleSelect = (id: string): void => {
     if (id === ADD_WORKSPACE) {
       openDirectoryFlow()
+      return
+    }
+    if (id === IMPORT_CODE_WORKSPACE) {
+      openImportFlow()
       return
     }
     onPick(id as WorkspaceId)
@@ -264,12 +362,37 @@ export function WorkspacePickFlow({
           <>
             <Button variant="outline" className={css.modalAction} onClick={closeModal}>{t('cancel')}</Button>
             {/* Retrying needs an occupant to serve the flow; without one the
-              * button would open a flow nobody can answer or cancel. */}
-            <Button variant="primary" className={css.modalAction} disabled={!flowAvailable} onClick={openDirectoryFlow}>{t('folderError.retry')}</Button>
+              * button would open a flow nobody can answer or cancel. Import
+              * failures retry through the import flow instead. */}
+            <Button variant="primary" className={css.modalAction} disabled={!importRetry && !flowAvailable} onClick={importRetry ? openImportFlow : openDirectoryFlow}>{importRetry ? t('import.retry') : t('folderError.retry')}</Button>
           </>
         )}
       >
         <div className={css.modalError} role="alert">{modalError}</div>
+      </Modal>
+      <Modal
+        open={importOpen}
+        onClose={closeImport}
+        closeLabel={t('close')}
+        title={t('import.title')}
+        footer={(
+          <>
+            <Button variant="outline" className={css.modalAction} disabled={importPending} onClick={closeImport}>{t('cancel')}</Button>
+            <Button variant="primary" className={css.modalAction} disabled={importPending || importPath.trim() === ''} onClick={submitImport}>{t('import.confirm')}</Button>
+          </>
+        )}
+      >
+        <div className={css.modalError}>{t('import.desc')}</div>
+        <input
+          className={css.modalAction}
+          value={importPath}
+          placeholder={t('import.placeholder')}
+          aria-label={t('import.title')}
+          disabled={importPending}
+          onChange={(event) => { setImportPath(event.target.value) }}
+          onKeyDown={(event) => { if (event.key === 'Enter') submitImport() }}
+        />
+        {importPending && <div className={css.modalError} role="status">{t('import.pending')}</div>}
       </Modal>
     </>
   )
@@ -292,6 +415,7 @@ export function WorkspacePicker({
   useDirectoryFlow,
   renderSlot,
   t,
+  importCodeWorkspace,
 }: WorkspacePickerProps) {
   return (
     <WorkspacePickFlow
@@ -305,6 +429,7 @@ export function WorkspacePicker({
       selectedId={selectedId}
       onPick={onPick}
       onClose={onClose}
+      importCodeWorkspace={importCodeWorkspace}
     />
   )
 }

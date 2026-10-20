@@ -1,7 +1,7 @@
 /** Test-owned workspaces face: the renderer standard-kit observable plus recorded actions. */
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type {
-  IWorkspaces, WorkspaceId, WorkspaceSnapshot, WorkspaceView,
+  IWorkspaces, WorkspaceId, WorkspaceImportCodeWorkspaceValue, WorkspaceSnapshot, WorkspaceView,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -142,6 +142,25 @@ export class TestWorkspaces implements IWorkspaces {
     return {
       workspaceId, title: '', path: '', paths: [], missingPaths: [], sessionIds: [],
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+  }
+
+  /**
+   * Import a `.code-workspace` document (recorded; default answers a fresh stub view).
+   * @param path - document path.
+   * @returns the import outcome.
+   */
+  async importCodeWorkspace(path: string): Promise<WorkspaceImportCodeWorkspaceValue> {
+    this.calls.push({ method: 'importCodeWorkspace', args: [path] })
+    const stub = this.stubs.get('importCodeWorkspace')
+    if (stub !== undefined) return await (stub(path) as Promise<WorkspaceImportCodeWorkspaceValue>)
+    return {
+      workspace: {
+        workspaceId: 'imported' as WorkspaceId, title: '', path, paths: [path], missingPaths: [], sessionIds: [],
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+      created: true,
+      document: path,
     }
   }
 

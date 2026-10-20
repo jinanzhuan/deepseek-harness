@@ -947,6 +947,7 @@ export function WorkspaceBrowser({
   createWorkspace,
   addProject,
   removeProject,
+  importCodeWorkspace,
   canRevealWorkspacePath,
   revealWorkspacePath,
   searchSessions,
@@ -1489,6 +1490,7 @@ export function WorkspaceBrowser({
           side="right"
           projectTarget={projectTarget}
           addProject={addProject}
+          importCodeWorkspace={importCodeWorkspace}
           onClearProjectTarget={() => { setProjectTarget(null) }}
           onPick={(workspaceId) => {
             closeAddWorkspace()

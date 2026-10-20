@@ -19,6 +19,7 @@ export { WorkspaceArchiveError, WorkspaceController, WorkspaceCreateError } from
 export type { IWorkspaces, WorkspaceSource } from './service.ts'
 export type {
   SessionActivity, SessionActivityItem, SessionActivityKind, SessionActivityKindMap, WorkspaceId,
+  WorkspaceImportCodeWorkspaceValue,
   WorkspaceView,
 } from '../types.ts'
 

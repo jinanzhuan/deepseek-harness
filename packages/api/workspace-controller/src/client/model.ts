@@ -11,6 +11,7 @@ import type {
   WorkspaceCreateRequest,
   WorkspaceCreateValue,
   WorkspaceDeleteValue,
+  WorkspaceImportCodeWorkspaceValue,
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
   WorkspacePinSessionRequest,
@@ -144,6 +145,17 @@ export class ClientWorkspaceModel implements WorkspaceFollowSink {
    */
   async removeProject(workspaceId: WorkspaceId, path: string): Promise<RemoteResult<WorkspaceValue>> {
     const result = await this.remote.removeProject({ workspaceId, path })
+    if (result.ok) this.upsert(result.value.workspace)
+    return result
+  }
+
+  /**
+   * Import a `.code-workspace` document as a Workspace and merge the unary result immediately.
+   * @param path - document path, or a directory holding exactly one.
+   * @returns generated Remote result.
+   */
+  async importCodeWorkspace(path: string): Promise<RemoteResult<WorkspaceImportCodeWorkspaceValue>> {
+    const result = await this.remote.importCodeWorkspace({ path })
     if (result.ok) this.upsert(result.value.workspace)
     return result
   }

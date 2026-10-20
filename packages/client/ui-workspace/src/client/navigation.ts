@@ -116,6 +116,11 @@ export interface UiWorkspace {
    */
   pickDirectory(): Promise<string | null>
   /**
+   * Open the Host-native document picker (the .code-workspace import flow).
+   * @returns the selected document, or null when cancelled.
+   */
+  pickDocument(): Promise<string | null>
+  /**
    * List one Host directory level.
    * @param path - directory path; absent selects the Host home.
    * @param signal - cancellation for a superseded scan.
@@ -390,6 +395,12 @@ class UiWorkspaceService extends Service implements UiWorkspace {
   async pickDirectory(): Promise<string | null> {
     const result = await this.directoryPicker.pick()
     if (!result.ok) throw new Error(`directory picker failed: ${result.error.message}`)
+    return result.value
+  }
+
+  async pickDocument(): Promise<string | null> {
+    const result = await this.directoryPicker.pickDocument()
+    if (!result.ok) throw new Error(`document picker failed: ${result.error.message}`)
     return result.value
   }
 

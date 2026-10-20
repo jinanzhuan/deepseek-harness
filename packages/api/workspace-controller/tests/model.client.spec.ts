@@ -11,6 +11,8 @@ import type {
   WorkspaceDeleteRequest,
   WorkspaceDeleteValue,
   WorkspaceFollowFrame,
+  WorkspaceImportCodeWorkspaceRequest,
+  WorkspaceImportCodeWorkspaceValue,
   WorkspaceInsertBeforeRequest,
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
@@ -87,6 +89,14 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
     }))
   onRemoveProject: (request: WorkspaceRemoveProjectRequest) => Promise<RemoteResult<WorkspaceValue>> = request =>
     Promise.resolve(remoteOk({ workspace: workspace(String(request.workspaceId)) }))
+  onImportCodeWorkspace: (
+    request: WorkspaceImportCodeWorkspaceRequest,
+  ) => Promise<RemoteResult<WorkspaceImportCodeWorkspaceValue>> = request =>
+    Promise.resolve(remoteOk({
+      workspace: workspace(request.path.split('/').pop() ?? 'imported'),
+      created: true,
+      document: request.path,
+    }))
   onInsertBefore: (
     request: WorkspaceInsertBeforeRequest,
   ) => Promise<RemoteResult<WorkspaceOrderValue>> = request =>
@@ -136,6 +146,13 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
   removeProject(request: WorkspaceRemoveProjectRequest): Promise<RemoteResult<WorkspaceValue>> {
     this.record('removeProject', request)
     return this.onRemoveProject(request)
+  }
+
+  importCodeWorkspace(
+    request: WorkspaceImportCodeWorkspaceRequest,
+  ): Promise<RemoteResult<WorkspaceImportCodeWorkspaceValue>> {
+    this.record('importCodeWorkspace', request)
+    return this.onImportCodeWorkspace(request)
   }
 
   insertBefore(request: WorkspaceInsertBeforeRequest): Promise<RemoteResult<WorkspaceOrderValue>> {

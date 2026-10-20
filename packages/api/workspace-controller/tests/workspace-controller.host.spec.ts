@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -337,6 +337,65 @@ describe('WorkspaceController commands', () => {
     const remoteFailure = new RemoteError('fixture/failure', 'already mapped', {})
     vi.spyOn(ctx.workspaceRegistry, 'removePath').mockRejectedValueOnce(remoteFailure)
     await expect(controller.removeProject({ workspaceId, path: member })).rejects.toBe(remoteFailure)
+  })
+
+  it('imports a .code-workspace document as a Workspace, folding repeats into the owner', async () => {
+    const { controller, root } = await harness()
+    // The shared ledger lives under DSH_HOME; point it at the test root so
+    // the import never touches the operator's real ledger.
+    vi.stubEnv('DSH_HOME', root)
+    const primary = stageDir(root, 'pa')
+    const member = stageDir(root, 'pb')
+    mkdirSync(join(root, 'docs'), { recursive: true })
+    writeFileSync(
+      join(root, 'docs', 'probe.code-workspace'),
+      JSON.stringify({ folders: [{ path: '../pa' }, { path: '../pb' }, { path: '../missing' }] }),
+    )
+
+    const imported = await controller.importCodeWorkspace({ path: join(root, 'docs') })
+    expect(imported.created).toBe(true)
+    expect(imported.document).toBe(realpathSync(join(root, 'docs', 'probe.code-workspace')))
+    expect(imported.workspace.title).toBe('probe')
+    expect(imported.workspace.paths).toEqual([primary, member])
+
+    // A second import of a document headed by the same folder merges members
+    // instead of registering a duplicate.
+    mkdirSync(join(root, 'pc'))
+    writeFileSync(
+      join(root, 'again.code-workspace'),
+      JSON.stringify({ folders: [{ path: 'pa' }, { path: 'pc' }] }),
+    )
+    const merged = await controller.importCodeWorkspace({ path: join(root, 'again.code-workspace') })
+    expect(merged.created).toBe(false)
+    expect(merged.workspace.workspaceId).toBe(imported.workspace.workspaceId)
+    expect(merged.workspace.paths).toEqual([primary, member, realpathSync(join(root, 'pc'))])
+
+    // The shared ledger records both documents and bumps revision per import.
+    const ledger = JSON.parse(readFileSync(join(root, 'storages', 'code-workspace-auto-sync.json'), 'utf8')) as {
+      revision: number
+      documents: string[]
+    }
+    expect(ledger.revision).toBe(2)
+    expect(ledger.documents).toEqual([
+      realpathSync(join(root, 'docs', 'probe.code-workspace')),
+      realpathSync(join(root, 'again.code-workspace')),
+    ])
+
+    await expect(controller.importCodeWorkspace({ path: join(root, 'missing-dir') }))
+      .rejects.toMatchObject({ code: 'workspace/import-not-found' })
+    await expect(controller.importCodeWorkspace({ path: primary }))
+      .rejects.toMatchObject({ code: 'workspace/import-no-document' })
+    await expect(controller.importCodeWorkspace({ path: join(root, 'again.code-workspace') + '.txt' }))
+      .rejects.toMatchObject({ code: 'workspace/import-not-found' })
+    writeFileSync(join(root, 'plain.txt'), '{}')
+    await expect(controller.importCodeWorkspace({ path: join(root, 'plain.txt') }))
+      .rejects.toMatchObject({ code: 'workspace/import-invalid' })
+    writeFileSync(join(root, 'empty.code-workspace'), JSON.stringify({ folders: [] }))
+    await expect(controller.importCodeWorkspace({ path: join(root, 'empty.code-workspace') }))
+      .rejects.toMatchObject({ code: 'workspace/import-empty' })
+    writeFileSync(join(root, 'broken.code-workspace'), '{')
+    await expect(controller.importCodeWorkspace({ path: join(root, 'broken.code-workspace') }))
+      .rejects.toMatchObject({ code: 'workspace/import-parse' })
   })
 
   it('pins only known unarchived Sessions and unpins idempotently', async () => {

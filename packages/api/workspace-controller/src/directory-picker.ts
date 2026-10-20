@@ -62,6 +62,31 @@ export class DirectoryPickerController extends TypertRemoteService {
   }
 
   /**
+   * Open the host's OS chooser for a DOCUMENT, restricted to the given
+   * extensions where the platform dialog supports it. Backends without a
+   * document chooser refuse with `directory-picker/unsupported`, so the
+   * caller can fall back to a typed path.
+   * @param signal - caller lifetime; abort terminates the chooser.
+   * @returns the chosen absolute path, or null when the operator cancels.
+   */
+  @Remote('pickDocument')
+  async pickDocument(signal: AbortSignal): Promise<string | null> {
+    const capability = this.requireCapability('native', 'pickDocument')
+    if (typeof capability.pickDocument !== 'function') {
+      throw new RemoteError(
+        'directory-picker/unsupported',
+        `the composed ${capability.kind} picker has no document chooser`,
+        { capability: capability.kind },
+      )
+    }
+    try {
+      return await capability.pickDocument(signal, ['code-workspace'])
+    } catch (error: unknown) {
+      throw cancellableFailure(error, signal, 'document picker was aborted', 'document picker failed')
+    }
+  }
+
+  /**
    * List one directory level for a Remote caller's in-app browser.
    * @param path - absolute directory to list; absent lists the home directory.
    * @param signal - caller lifetime; abort stops the backend's scan instead of

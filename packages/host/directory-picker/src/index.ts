@@ -25,6 +25,15 @@ export interface DirectoryPickerNativeCapability {
    * @returns the chosen absolute path, or null when the operator cancels.
    */
   pick(signal: AbortSignal): Promise<string | null>
+  /**
+   * Open the chooser in document mode, restricted to the given extensions
+   * where the platform dialog supports it. Optional: a backend without a
+   * document chooser omits it, and callers fall back to a typed path.
+   * @param signal - caller/connection lifetime; abort terminates the chooser.
+   * @param extensions - file extensions without the dot (e.g. `code-workspace`).
+   * @returns the chosen absolute path, or null when the operator cancels.
+   */
+  pickDocument?(signal: AbortSignal, extensions?: readonly string[]): Promise<string | null>
 }
 
 /**

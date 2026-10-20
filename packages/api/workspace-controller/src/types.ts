@@ -60,6 +60,22 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     }
     /** The verb needs an interaction the composed backend does not serve. */
     'directory-picker/unavailable': { readonly capability: string }
+    /** The composed backend has no document chooser; the caller falls back to a typed path. */
+    'directory-picker/unsupported': { readonly capability: string }
+    /** The import request names neither a `.code-workspace` document nor a directory. */
+    'workspace/import-invalid': { readonly path: string }
+    /** The import path does not exist. */
+    'workspace/import-not-found': { readonly path: string }
+    /** The directory holds no `.code-workspace` document. */
+    'workspace/import-no-document': { readonly path: string }
+    /** The directory holds more than one `.code-workspace` document; `names` lists them. */
+    'workspace/import-ambiguous': { readonly path: string; readonly names: readonly string[] }
+    /** The document lists no existing folder. */
+    'workspace/import-empty': { readonly path: string }
+    /** The document is not parseable JSON. */
+    'workspace/import-parse': { readonly path: string }
+    /** The import failed for a reason outside the closed codes. */
+    'workspace/import-failed': { readonly path: string }
     /** The target is not fully qualified, or the backend cannot list it. */
     'directory-picker/unreadable': { readonly path: string }
     /** A child of that name is already there. */
@@ -106,6 +122,20 @@ export interface WorkspaceAddProjectRequest {
 export interface WorkspaceRemoveProjectRequest {
   readonly workspaceId: WorkspaceId
   readonly path: string
+}
+
+/** `.code-workspace` document (or a directory holding exactly one) requested for import. */
+export interface WorkspaceImportCodeWorkspaceRequest {
+  readonly path: string
+}
+
+/** Import outcome: the Workspace the document folded into, and the canonical document path. */
+export interface WorkspaceImportCodeWorkspaceValue {
+  readonly workspace: WorkspaceView
+  /** True when this call registered the Workspace; false when the document merged into an existing one. */
+  readonly created: boolean
+  /** Canonical path of the imported `.code-workspace` document. */
+  readonly document: string
 }
 
 /** Receipt after one Workspace registration is deleted. */

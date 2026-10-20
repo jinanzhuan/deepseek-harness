@@ -278,6 +278,7 @@ export function apply(ctx: Context): void {
     unarchiveSession: async (sessionId) => { await uiWorkspace.unarchiveSession(sessionId) },
     createWorkspace: input => workspaces.create(input),
     addProject: async (workspaceId, path) => { await workspaces.addProject(workspaceId, path) },
+    importCodeWorkspace: path => workspaces.importCodeWorkspace(path),
     removeProject: async (workspaceId, path) => { await workspaces.removeProject(workspaceId, path) },
     canRevealWorkspacePath: async () => {
       const result = await ctx.remote.session.canOpenWorkspacePath()
@@ -295,6 +296,7 @@ export function apply(ctx: Context): void {
   })
   const pickerInjected = (): WorkspacePickerInjected => ({
     createWorkspace: input => workspaces.create(input),
+    importCodeWorkspace: path => workspaces.importCodeWorkspace(path),
     hooks: { directoryFlow: pickerFlowSource },
   })
   // Each registration declares its owned children in the same call; slot

@@ -201,6 +201,7 @@ class FakeWorkspaces implements IWorkspaces {
   declare readonly delete: IWorkspaces['delete']
   declare readonly addProject: IWorkspaces['addProject']
   declare readonly removeProject: IWorkspaces['removeProject']
+  declare readonly importCodeWorkspace: IWorkspaces['importCodeWorkspace']
   declare readonly insertBefore: IWorkspaces['insertBefore']
   declare readonly insertSessionBefore: IWorkspaces['insertSessionBefore']
   readonly pinCalls: SessionId[] = []
@@ -253,12 +254,14 @@ class FakeDirectoryPicker {
   readonly calls: { method: string; payload: unknown }[] = []
 
   onPick: () => Promise<RemoteResult<string | null>> = () => Promise.resolve({ ok: true, value: null })
+  onPickDocument: () => Promise<RemoteResult<string | null>> = () => Promise.resolve({ ok: true, value: null })
   onList: () => Promise<RemoteResult<DirectoryListing>> = () => Promise.resolve({ ok: true, value: listing })
   onCreateDirectory: () => Promise<RemoteResult<string>> =
     () => Promise.resolve({ ok: true, value: '/home/u/new' })
 
   readonly remote: ClientRemote['directoryPicker'] = {
     pick: () => this.record('pick', {}, this.onPick()),
+    pickDocument: () => this.record('pickDocument', {}, this.onPickDocument()),
     list: (path?: string) => this.record('list', { path }, this.onList()),
     createDirectory: (path: string, name: string) =>
       this.record('createDirectory', { path, name }, this.onCreateDirectory()),

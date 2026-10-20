@@ -4,7 +4,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
-import type { WorkspaceView } from '../types.ts'
+import type { WorkspaceImportCodeWorkspaceValue, WorkspaceView } from '../types.ts'
 import type { ClientWorkspaceModel, WorkspaceSnapshot } from './model.ts'
 
 /** Structured create failure for callers that distinguish Host business errors. */
@@ -80,6 +80,12 @@ export interface IWorkspaces {
    * @returns the updated Workspace.
    */
   removeProject(workspaceId: WorkspaceId, path: string): Promise<WorkspaceView>
+  /**
+   * Import a `.code-workspace` document as a Workspace.
+   * @param path - document path, or a directory holding exactly one.
+   * @returns the Workspace the document folded into, whether it was created, and the canonical document path.
+   */
+  importCodeWorkspace(path: string): Promise<WorkspaceImportCodeWorkspaceValue>
   /**
    * Delete a Workspace registration without deleting Sessions or files.
    * @param workspaceId - target Workspace.
@@ -169,6 +175,12 @@ export class WorkspaceController extends Service implements IWorkspaces {
     const result = await this.model.removeProject(workspaceId, path)
     if (!result.ok) throw commandError('remove project path', result.error)
     return result.value.workspace
+  }
+
+  async importCodeWorkspace(path: string): Promise<WorkspaceImportCodeWorkspaceValue> {
+    const result = await this.model.importCodeWorkspace(path)
+    if (!result.ok) throw commandError('import .code-workspace', result.error)
+    return result.value
   }
 
   async delete(workspaceId: WorkspaceId): Promise<void> {

@@ -17,6 +17,9 @@ export interface DirectoryPickerInternals {
 /** The prompt every native chooser shows. */
 const DIALOG_TITLE = 'Select Workspace Directory'
 
+/** The prompt the document chooser shows. */
+const DOCUMENT_DIALOG_TITLE = 'Select Workspace Document'
+
 /**
  * macOS panel source, run by the system JXA host (`osascript -l JavaScript`).
  *
@@ -65,6 +68,44 @@ function outputPath(stdout: string): string | null {
   const path = stdout.replace(/[\r\n]+$/, '')
   return path === '' ? null : path
 }
+
+/**
+ * macOS document panel source: the same JXA `NSOpenPanel` host as
+ * {@link MAC_PANEL}, but choosing files, optionally restricted to the given
+ * extensions (argv[1], comma-joined; empty means any file). An unresolvable
+ * extension makes AppKit reject the panel at runModal, so the caller retries
+ * once without the filter.
+ */
+const MAC_DOCUMENT_PANEL = `
+ObjC.import('AppKit');
+function run(argv) {
+  var app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+  var mainMenu = $.NSMenu.alloc.init;
+  mainMenu.addItem($.NSMenuItem.alloc.init);
+  var editMenu = $.NSMenu.alloc.initWithTitle('Edit');
+  var editItem = $.NSMenuItem.alloc.init;
+  editItem.submenu = editMenu;
+  mainMenu.addItem(editItem);
+  editMenu.addItemWithTitleActionKeyEquivalent('Undo', 'undo:', 'z');
+  editMenu.addItemWithTitleActionKeyEquivalent('Redo', 'redo:', 'Z');
+  editMenu.addItemWithTitleActionKeyEquivalent('Cut', 'cut:', 'x');
+  editMenu.addItemWithTitleActionKeyEquivalent('Copy', 'copy:', 'c');
+  editMenu.addItemWithTitleActionKeyEquivalent('Paste', 'paste:', 'v');
+  editMenu.addItemWithTitleActionKeyEquivalent('Select All', 'selectAll:', 'a');
+  app.mainMenu = mainMenu;
+  app.activateIgnoringOtherApps(true);
+  var panel = $.NSOpenPanel.openPanel;
+  panel.canChooseFiles = true;
+  panel.canChooseDirectories = false;
+  panel.allowsMultipleSelection = false;
+  panel.message = argv[0];
+  if (argv.length > 1 && argv[1] !== '') panel.allowedFileTypes = argv[1].split(',');
+  if (panel.runModal !== $.NSModalResponseOK) return '';
+  var urls = panel.URLs;
+  if (urls.count < 1) return '';
+  return ObjC.unwrap(urls.objectAtIndex(0).path);
+}`
 
 function errorCode(error: unknown): string | number | undefined {
   if (typeof error !== 'object' || error === null || !('code' in error)) return undefined
@@ -136,4 +177,64 @@ export async function pickNativeDirectory(
   }
 
   throw new Error(`native directory picker is unsupported on ${platform}`)
+}
+
+/**
+ * Open the platform document picker, restricted to `extensions` where the
+ * platform dialog supports it. Windows has no document variant here (the
+ * koffi dialog is directory-only), so it rejects as unsupported and the
+ * caller falls back to a typed path.
+ * @param signal - caller/connection lifetime; abort terminates the native command.
+ * @param extensions - file extensions without the dot; empty means any file.
+ * @param internals - Platform and runner hooks for deterministic tests.
+ * @returns the selected path, or null when the user cancels.
+ */
+export async function pickNativeDocument(
+  signal: AbortSignal,
+  extensions: readonly string[] = [],
+  internals: DirectoryPickerInternals = {},
+): Promise<string | null> {
+  const platform = internals.platform ?? process.platform
+  const run = internals.run ?? runNativeCommand
+
+  if (platform === 'darwin') {
+    const filter = extensions.join(',')
+    if (filter !== '') {
+      try {
+        const result = await run(
+          'osascript', ['-l', 'JavaScript', '-e', MAC_DOCUMENT_PANEL, DOCUMENT_DIALOG_TITLE, filter], signal, 'hidden',
+        )
+        return outputPath(result.stdout)
+      } catch (error: unknown) {
+        // An extension AppKit cannot resolve rejects the panel; retry without
+        // the filter rather than losing the chooser entirely.
+        rethrowIfAborted(signal, error)
+      }
+    }
+    const result = await run(
+      'osascript', ['-l', 'JavaScript', '-e', MAC_DOCUMENT_PANEL, DOCUMENT_DIALOG_TITLE], signal, 'hidden',
+    )
+    return outputPath(result.stdout)
+  }
+
+  if (platform === 'linux') {
+    const filters = extensions.length === 0
+      ? []
+      : [`--file-filter=Workspace documents | ${extensions.map(extension => `*.${extension}`).join(' ')}`]
+    try {
+      const result = await run('zenity', [
+        '--file-selection', `--title=${DOCUMENT_DIALOG_TITLE}`, ...filters,
+      ], signal, 'hidden')
+      return outputPath(result.stdout)
+    } catch (error: unknown) {
+      rethrowIfAborted(signal, error)
+      if (errorCode(error) === 1) return null
+      if (isMissingCommand(error)) {
+        throw new Error('no supported native document picker found (install zenity)')
+      }
+      throw error
+    }
+  }
+
+  throw new Error(`native document picker is unsupported on ${platform}`)
 }

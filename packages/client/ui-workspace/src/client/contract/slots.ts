@@ -66,6 +66,12 @@ export interface DirectoryFlowOwnerProps {
   open: boolean
   /** True while the owner adopts a picked path (`createWorkspace` in flight); occupants disable their commit affordances. */
   busy: boolean
+  /**
+   * True asks the occupant for a document chooser (the .code-workspace import
+   * flow); occupants without one fall back to the directory chooser, whose
+   * answer the caller still validates.
+   */
+  document?: boolean
   /** The operator picked a directory (absolute host path); the owner adopts it. */
   onPicked: (path: string) => void
   /** The operator dismissed the interaction; the owner just closes the flow. */
@@ -280,6 +286,11 @@ export type WorkspaceBrowserInjected = {
   addProject?: (workspaceId: WorkspaceId, path: string) => Promise<void>
   /** Remove one member directory from a Workspace (multi-root). Absent disables member removal. */
   removeProject?: (workspaceId: WorkspaceId, path: string) => Promise<void>
+  /**
+   * Import one `.code-workspace` document as a Workspace; the rejection
+   * carries the Host failure code (`workspace/import-*`). Absent hides the import entry.
+   */
+  importCodeWorkspace?: (path: string) => Promise<unknown>
   /**
    * Whether the Host can open Workspace paths in the system file manager;
    * absent disables the member row's reveal menu item.
@@ -502,6 +513,8 @@ export type WorkspaceBrowserProps =
 export type WorkspacePickerInjected = DirectoryPickingInjected & {
   /** Adopt a picked host directory as a real Workspace before targeting a Session. */
   createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
+  /** Import one `.code-workspace` document as a Workspace; the rejection may carry a Host failure code (`workspace/import-*`). */
+  importCodeWorkspace?: (path: string) => Promise<unknown>
 }
 
 /**

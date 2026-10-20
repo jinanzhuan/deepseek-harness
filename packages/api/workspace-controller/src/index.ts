@@ -20,6 +20,8 @@ import type {
   WorkspaceDeleteValue,
   WorkspaceFollowFrame,
   WorkspaceId,
+  WorkspaceImportCodeWorkspaceRequest,
+  WorkspaceImportCodeWorkspaceValue,
   WorkspaceInsertBeforeRequest,
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
@@ -153,6 +155,17 @@ export class WorkspaceController extends TypertRemoteService {
   @Remote('removeProject')
   removeProject(request: WorkspaceRemoveProjectRequest): Promise<WorkspaceValue> {
     return this.commands.removeProject(request)
+  }
+
+  /**
+   * Import one `.code-workspace` document as a Workspace, folding into the
+   * existing owner of its first folder instead of registering a duplicate.
+   * @param request - document path, or a directory holding exactly one.
+   * @returns the Workspace projection, whether this call created it, and the canonical document path.
+   */
+  @Remote('importCodeWorkspace')
+  importCodeWorkspace(request: WorkspaceImportCodeWorkspaceRequest): Promise<WorkspaceImportCodeWorkspaceValue> {
+    return this.commands.importCodeWorkspace(request)
   }
 
   /**
